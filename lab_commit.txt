@@ -1,0 +1,25 @@
+Audio: reverte leitura de wet/dry com swap e revalida rampas em 32 bits
+
+A leitura de wet/dry com swap ^2 zerava os dois ganhos mestres:
+
+    [ganhos] swap: dry=0 wet=0 | cru: dry=26698 wet=18997
+
+Com os ganhos em zero, toda voz que retoma estado (flags=0x08) ficava muda e
+o sinal caia ~10x. A metrica de divergencia contra o microcodigo "melhorou"
+de 223 para ~45 listas por isso: saida quase silenciosa diverge pouco em
+valor absoluto. Era artefato, nao correcao.
+
+Descoberto porque o teste auditivo contradisse o numero. O erro de metodo foi
+medir divergencia sem medir nivel junto - uma metrica que premia silencio
+precisa de contrapeso.
+
+Nesta reversao:
+  - wet/dry voltam a leitura crua (o comentario original do codigo, que eu
+    havia sobrescrito, estava certo);
+  - rampas em int32 REVALIDADAS sobre a base correta e mantidas: media 25,31%
+    contra 30,92% do int64, com RMS e DC iguais - ganho real, sem atenuacao;
+  - ANALISE_AUDIO.md ganha a secao 5k marcando 5c a 5j como contaminadas, e
+    avisos no topo para nao repetir o erro.
+
+Estado restaurado: 25,31% de media, 223 listas acima de 1%, DC +278,
+RMS 4915 - identico ao ponto de partida real.

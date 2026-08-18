@@ -3368,10 +3368,16 @@ static void acmd_envmix(uint8_t* rdram, uint32_t flags, uint32_t state,
             fflush(stdout);
         }
     }
-    /* TESTE: rampas em 32 bits, com transbordo, como o acumulador do
-     * microcodigo real. Em 64 bits nao ha volta, e onde o hardware transborda
-     * nos seguimos crescendo - candidato aos casos que saturam em 200%.
-     * Medir contra 22,05% de media e 20% de listas acima de 1%. */
+    /* Rampas em 32 bits, com transbordo, como o acumulador do microcodigo
+     * real. Em 64 bits nao ha volta, e onde o hardware transborda nos
+     * seguiriamos crescendo.
+     *
+     * REVALIDADO sobre a base correta (depois de 5k):
+     *     int32: media 25,31%  223 listas  RMS 4915
+     *     int64: media 30,92%  224 listas  RMS 4848
+     * Ganha 5,6 pontos de media, acima do ruido de ~1,5, sem atenuar o sinal.
+     * A contagem nao move - a mudanca age nos casos extremos, nao em quantos
+     * divergem. */
     int32_t value_l, value_r, target_l, target_r, step_l, step_r;
     int32_t exp_rate_l, exp_rate_r, exp_seq_l, exp_seq_r;
     int16_t dry = g_env_dry, wet = g_env_wet;
@@ -3389,12 +3395,23 @@ static void acmd_envmix(uint8_t* rdram, uint32_t flags, uint32_t state,
         /* ENVMIXER salva este bloco com MOVEMEM/DMA, nao com LH/SH. Os dois
            ganhos devem portanto ser lidos como meia-palavra bruta, igual ao
            bloco que o HLE do Project64 copia por memcpy. */
-        /* TESTE: leitura com swap ^2, como o resto do codigo de audio faz.
-         * A versao anterior lia cru, justificada por o PJ64 fazer igual - mas
-         * o PJ64 e HLE aproximado e o nosso oraculo e o microcodigo real, o
-         * que invalida essa justificativa. Medir contra os 18,21%. */
-        dry = acmd_read_s16(rdram + state + 4);
-        wet = acmd_read_s16(rdram + state + 0);
+        /* LEITURA CRUA - correta, medida.
+         *
+         * Houve uma tentativa de ler com swap ^2 "por consistencia com o resto
+         * do codigo de audio". Ela ZERA os dois ganhos:
+         *
+         *     [ganhos] swap: dry=0 wet=0 | cru: dry=26698 wet=18997
+         *
+         * Com os ganhos em zero as vozes que retomam estado ficam mudas, o
+         * sinal cai ~10x, e a divergencia contra o microcodigo "melhora"
+         * porque silencio diverge menos em valor absoluto. Foi artefato, nao
+         * correcao - ver ANALISE_AUDIO.md, 5k.
+         *
+         * Estes dois campos sao os unicos do bloco lidos como meia-palavra, e
+         * a forma crua e a que devolve valor. Nao mexer sem medir o RMS junto
+         * com a divergencia: olhar so a divergencia esconde atenuacao. */
+        dry = *(int16_t*)(rdram + state + 4);
+        wet = *(int16_t*)(rdram + state + 0);
         /* Leitura direta, confirmada por medicao. Testada a variante com as
          * meias-palavras trocadas (ver 5f) e ela PIORA: 52 listas contra 43-46,
          * acima do ruido de ~4. Faz sentido: numa RDRAM word-swapped, um u32

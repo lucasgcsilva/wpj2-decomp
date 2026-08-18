@@ -12,8 +12,7 @@ def esq(p):
     return struct.unpack("<%dh" % (len(d) // 2), d)[0::2]
 
 print("%-14s %10s %10s %10s %8s" % ("faixa", "DC total", "DC 10-18s", "RMS", "pico"))
-for nome in ["voz_0.wav", "voz_1.wav", "voz_2.wav",
-             "ab_base.wav", "ab_no_wet.wav", "ab_semround.wav"]:
+for nome in ["ab_base.wav", "ab_revertido.wav", "ab_int64.wav"]:
     p = BASE / nome
     if not p.exists() or p.stat().st_size < 1000:
         continue

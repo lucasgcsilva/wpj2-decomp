@@ -8,21 +8,37 @@ decidir entre elas.
 sobreposto, intermitente, com estalos ("pipoco") em alguns trechos. Não é
 bloqueador para o resto da decompilação.
 
-**Divergência atual contra o microcódigo real da ROM: ~9% em média, com ~45
-listas (15%) errando acima de 1% do fundo de escala** — confirmado em duas
-execuções (9,66%/46 e 8,98%/43). Era **18,21% e 223 listas (74%)** no início
-desta sessão; ver 5c e 5d.
+**Divergência contra o microcódigo real da ROM: 25,31% em média, com 223
+listas (74%) errando acima de 1% do fundo de escala.**
+
+> ### ⚠️ Leia 5k antes de 5c–5j
+>
+> As seções 5c a 5j relatam uma melhora de 223 para ~45 listas. **Ela não
+> existiu.** A alteração de 5c zerava os ganhos mestres e silenciava a mistura;
+> a divergência caiu porque silêncio diverge pouco. Tudo que foi medido sobre
+> aquela base está contaminado. As seções ficam no documento porque os
+> experimentos e as reversões continuam informativos — mas os *ganhos* não.
 
 > Use **as duas** métricas. A média é dominada por poucos casos que saturam em
 > 200%; a contagem acima de 1% é a que corresponde ao que se ouve. Uma
 > alteração pode piorar uma e melhorar a outra, e foi o que aconteceu em 5c.
 
 > **Ruído do instrumento — medido, não estimado.** Três execuções do mesmo
-> código (após 5d) deram **9,66% / 46**, **10,90% / 46** e **8,98% / 43**.
-> Portanto: diferenças de média abaixo de **~1,5 ponto** e de contagem abaixo
-> de **~4 listas** não significam nada. As listas musicais variam entre
+> código deram **9,66% / 46**, **10,90% / 46** e **8,98% / 43**. Portanto:
+> diferenças de média abaixo de **~1,5 ponto** e de contagem abaixo de
+> **~4 listas** não significam nada. As listas musicais variam entre
 > execuções, e é isso que move os números. Para julgar uma alteração, exija
 > movimento maior que isso — ou repita a medição.
+>
+> *(Os valores acima foram medidos sobre a base quebrada de 5c. A ordem de
+> grandeza do ruído continua válida; os níveis absolutos, não.)*
+
+> ### ⚠️ Meça o RMS junto com a divergência
+>
+> A divergência sozinha **premia silêncio**: uma saída atenuada diverge menos
+> em valor absoluto. Foi assim que 5c passou por melhora durante uma sessão
+> inteira. Toda medição de divergência deve vir acompanhada de RMS e DC —
+> `tools\medir_voz.py` faz os três de uma vez.
 
 ---
 
@@ -494,6 +510,76 @@ Se o ADPCM decodificado já tiver média não-nula, a origem está no decodifica
 (inicialização do preditor ou arredondamento), não na mistura. Existe a chave
 `WPJ2_AUDIO_VOICE=<n>` que deixa passar só uma voz — feita exatamente para
 isso.
+
+---
+
+## 5k. ⚠️ INVALIDAÇÃO — a melhora de 5c a 5j não existiu
+
+O teste auditivo não bateu com o número: a métrica dizia 5× melhor, o ouvido
+dizia que o chiado continuava. Investigando a discrepância, o RMS apareceu 10×
+menor, e a instrumentação dos ganhos deu a resposta:
+
+```
+[ganhos] swap: dry=0 wet=0 | cru: dry=26698 wet=18997
+```
+
+**A alteração de 5c zerava os dois ganhos mestres.** Toda voz que retoma
+estado (`flags=0x08`) ficava muda; só as vozes em `A_INIT` sobravam. A
+divergência caiu de 223 para ~45 listas porque a saída virou quase silêncio, e
+silêncio diverge pouco em valor absoluto.
+
+Verificação da reversão — os três números voltam ao original:
+
+| | DC total | DC 10–18 s | RMS |
+|---|---|---|---|
+| `ab_base` (origem) | 278,6 | 761,8 | 4892 |
+| `ab_semround` (base quebrada) | −24,1 | −41,6 | **466** |
+| `ab_revertido` (agora) | 278,1 | 716,6 | 4915 |
+
+População após reverter: **25,31% de média, 223 listas (74%)** — o valor de
+origem.
+
+### O que cai junto
+
+- **5c** — a leitura com swap `^2` está errada. A leitura crua é a correta, e
+  o comentário original do código, que foi sobrescrito, estava certo.
+- **5d** (rampas em `int32`) — **revalidada e mantida.** Refeita sobre a base
+  correta:
+
+  | | média | listas >1% | DC | RMS |
+  |---|---|---|---|---|
+  | `int32` | **25,31%** | 223 | 278,1 | 4915 |
+  | `int64` | 30,92% | 224 | 282,5 | 4848 |
+
+  Ganha 5,6 pontos de média, acima do ruído de ~1,5, e desta vez com o
+  contrapeso: RMS e DC praticamente idênticos, logo não é atenuação
+  disfarçada. A contagem não move — a mudança age nos casos extremos, não em
+  quantos divergem.
+- **5f, 5g** — as reversões continuam válidas como reversões (aquelas
+  variantes de fato pioravam), mas os números absolutos citados não valem.
+- **O teste do `+0x4000`** — o DC de −24 daquele experimento veio do sinal
+  estar silenciado, não de correção de viés. Precisa ser refeito.
+
+### O erro de método
+
+**Divergência foi medida sem nível.** Uma métrica que premia silêncio precisa
+de contrapeso, e o RMS só foi consultado quando o teste auditivo contradisse o
+número. Sem esse teste, o artefato teria ficado registrado como progresso.
+
+A regra que fica: **nenhuma medição de divergência vale sozinha.** RMS e DC
+entram junto, sempre.
+
+### O que sobrevive
+
+- A instrumentação (bisseção, modo população, oráculo do microcódigo).
+- O ruído do instrumento, em ordem de grandeza.
+- **5i** — o DC é proporcional à atividade, não constante. Medido no
+  `ab_base`, que é base boa.
+- **5j** — vozes isoladas têm DC entre −7 e −14 (centradas), mas somadas dão
+  +278. O offset é criado pela soma. Também medido sobre base boa.
+
+Esses dois últimos continuam sendo as pistas mais fortes, e apontam para a
+**acumulação** — não para o decodificador nem para a leitura de estado.
 
 ---
 
