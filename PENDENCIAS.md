@@ -1,0 +1,61 @@
+# Pendências de fidelidade visual
+
+## Abertura 2D — junções na grade durante o zoom da ENIX
+
+- **Impacto:** baixo. As linhas entre blocos aparecem durante a ampliação e
+  desaparecem depois; a logo final continua legível e correta.
+- **Localização:** estado `8/1`, mosaico de 30 `TEXRECT` (grade 5×6), blocos
+  de `64×32`, textura CI8.
+- **Referência:** Project64 não mostra as junções no vídeo de comparação.
+- **Oráculo disponível:** `oraculo/pj64-rdram/wpj2_8_1_texrect_oracle.txt`.
+- **Tentativas já feitas:** BILERP forçado, filtro final tipo VI, borda extra
+  de `TEXRECT` em COPY e permuta CI8 por DXT `0x100`. Nenhuma alterou o
+  resultado observável; filtros de apresentação permanecem desligados no
+  `TESTAR.bat`.
+- **Hipótese a revisar depois:** composição RDP de CI8/TLUT e semântica exata
+  de cobertura/ciclo COPY, validando contra um dump do framebuffer do
+  Project64 no mesmo retrace. Não aplicar pós-processamento global, pois isso
+  mascararia a causa e pode afetar texto/3D.
+
+## Corredor 3D — fidelidade de materiais e amostragem
+
+- **Impacto:** médio. A geometria estável do corredor, trono e diálogo é
+  renderizada, mas há serrilhado e diferenças no padrão circular sob o trono,
+  nas faixas azul/branco e no gradiente de fundo.
+- **Estado:** `12/50`.
+- **Oráculo disponível:** `oraculo/pj64-rdram/wpj2_material_12_50_oracle.txt`.
+  Ele confirma `LOADTLUT` em TMEM `0x800`, seguido por textura CI8 de `64×32`
+  e o respectivo `LOADBLOCK`/tile do material.
+- **Tentativas rejeitadas:** intercalação DXT para RGBA16 e CI no corredor,
+  combinador RDP genérico e BILERP forçado em TRI1. As três pioraram ou não
+  alteraram o resultado; as chaves no `TESTAR.bat` voltaram ao caminho estável.
+- **Próxima revisão:** implementar o layout completo de TMEM/combiner por
+  ciclo, validando cada material contra um framebuffer do Project64 no mesmo
+  retrace. Não usar pós-processamento global como substituto.
+# Corredor 3D — personagem central: entrada e persistência
+
+- **Impacto:** médio. Na primeira conversa em `12/50`, o personagem deveria subir de baixo para cima e permanecer visível quando a caixa de diálogo termina. No recompilado ele aparece estático/tarde e, em outro ponto, some junto com a caixa.
+- **Evidência:** `lab/tri_alpha.csv`, janela `gfx 1380..1540`, mostra que as 56–57 faixas de material da malha são submetidas em todos os lotes, mas a faixa projetada Y da parte central varia somente cerca de 7–8 pixels e se repete. O F5 em `gfx=1461` registra o trono sem o personagem completo.
+- **O que foi descartado:** desligar Z (`WPJ2_F3D_Z=0`) destrói a oclusão do trono e não recupera a animação; trocar para multiplicação convencional (`WPJ2_F3D_MATRIX_CONVENTIONAL=1`) deforma todo o corredor. A malha usa `SETCOMBINE FC1219FF/FFFFFE38` (TEXEL × SHADE), portanto não se deve aplicar o `PRIMITIVE alpha` da caixa como regra global ao personagem.
+- **Próxima revisão:** instrumentar a pilha F3DEX por `MTX/PUSH/POPMTX` e comparar suas matrizes locais com uma captura equivalente do Project64. A correção deve preservar a ordem de matriz e o Z atuais; não resolver por retenção artificial de framebuffer ou alpha específico do personagem.
+
+# Transições posteriores — 3D/2D e 2D/2D
+
+- **Impacto:** baixo enquanto as cenas seguintes são mapeadas. A saída do corredor para a ilha (`estado 8/13`, `f5_001`) deixa dois losangos pretos no céu; a troca entre cenários 2D (`8/12` e `8/6`, `f5_002`/`f5_003`) vai para preto e muda de forma seca, quando a referência usa fade-out/fade-in.
+- **Escopo:** não confundir com a primeira passagem 2D→3D, cujo intervalo preto curto já foi tratado separadamente. Estes casos usam outros lotes TEXRECT/alpha e devem ser comparados em uma revisão própria.
+- **Próxima revisão:** capturar as listas RDP desses três estados no Project64 e validar `PRIMITIVE alpha`, `SETCOMBINE` e a alternância do VI antes de alterar o compositor global.
+
+# Backend de GPU — substituição gradual do rasterizador RDP em CPU
+
+- **Impacto:** estratégico/médio. A cadência de VI foi medida em 59,996 Hz,
+  mas listas gráficas pesadas ainda podem produzir picos no rasterizador CPU;
+  Project64 transfere essa parte para a GPU.
+- **Estado atual:** `runtime/rsp.c` interpreta RSP/RDP e pinta triângulos,
+  texturas, Z, fog e blend em software. `runtime/video.c` apenas apresenta o
+  framebuffer final com GDI (`StretchDIBits`); não há Direct3D/OpenGL ativo.
+- **Próxima revisão:** criar backend Direct3D 11 opcional: primeiro swap chain
+  e apresentação de framebuffer, depois texturas/TMEM, triângulos, depth,
+  combiner, fog e coverage via shaders. Validar material a material contra o
+  Project64 antes de substituir o caminho CPU estável.
+- **Cuidado:** não ativar um filtro global como atalho para anti-aliasing; o
+  RDP depende de modos de ciclo e cobertura por material.

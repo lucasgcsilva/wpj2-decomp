@@ -1,0 +1,29 @@
+# funcao      tam    blocos de hardware referenciados
+func_800C41A0  0xA0    MI x2
+func_800C5100  0xB0    DPC x4
+func_800C7730  0x160   AI x3
+func_800C79B0  0x10    AI x1
+func_800C7A40  0xB0    AI x2
+func_800CB080  0x10    PI x1
+func_800CB090  0xE0    PI x6
+func_800CB170  0x2A0   PI x2
+func_800CBA60  0x150   VI x3
+func_800CC010  0x360   VI x10
+func_800CC370  0x534   AI x1 MI x3 PI x1 SI x1 SP x2 VI x1
+func_800CC98C  0x100   MI x1
+func_800CCAE4  0x17C   MI x1
+func_800CCC70  0x10    SP x1
+func_800CD010  0x10    SP x1
+func_800CD020  0x40    SP x1 SP_PC x1
+func_800CD060  0x90    SP x4
+func_800CD0F0  0x30    SP x1
+func_800CD120  0x30    DPC x1
+func_800CD4F0  0xB0    SI x3
+func_800CF810  0x30    AI x1
+func_800D45D0  0x60    PI x2
+func_800D4720  0x6A0   PI x12
+func_800D4DC0  0xE8    PI x5
+func_800D5060  0xE0    PI x6
+func_800D5500  0x30    SI x1
+func_800D69D0  0xF0    PI x4
+func_800D6B20  0x50    PI x2

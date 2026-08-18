@@ -1,0 +1,92 @@
+# ---------------------------------------------------------------------------
+# ROM e qualquer coisa derivada dela / ROM and anything derived from it
+#
+# O codigo deste repositorio e nosso; o conteudo do jogo nao. Nada que venha
+# da ROM entra aqui - nem a ROM, nem o codigo recompilado a partir dela, nem
+# textos, paletas, texturas ou despejos de memoria.
+# ---------------------------------------------------------------------------
+*.z64
+*.n64
+*.v64
+*.rom
+
+# Saida do N64Recomp: e uma traducao do codigo de maquina do jogo.
+# Gerada localmente a partir da sua propria copia da ROM.
+RecompiledFuncs/
+RecompiledFuncsTraced/
+RecompiledRSP/
+runtime/func_table.c
+analysis/
+
+# Conteudo extraido do jogo
+textos/
+objetos_ci8.bin
+tlut.bin
+cena
+cena/
+*.wpj2state
+displaylist.txt
+cena_maior_displaylist.txt
+executadas.txt
+laboraculo_transicao_stats.txt
+
+# Patch de traducao de terceiros. Trabalho autoral de outra pessoa; nao e
+# nosso para redistribuir. Quem quiser, obtem na fonte original.
+tools/wpj2e_v1/
+*.ips
+
+# Despejos de memoria e capturas de referencia
+oraculo/
+comparacao/
+*.ppm
+*.pcm
+*.wav
+*.bin
+
+# Excecao: as capturas do README. Sao imagens do NOSSO rasterizador rodando,
+# usadas para documentar o estado do projeto - nao recursos extraidos do jogo.
+!docs/*.png
+
+# ---------------------------------------------------------------------------
+# Dependencias de terceiros - referenciadas no README, nao versionadas aqui
+# Third-party dependencies - referenced in the README, not vendored here
+# ---------------------------------------------------------------------------
+tools/N64Recomp-source/
+tools/N64Recomp-build*/
+tools/N64ModernRuntime-source/
+tools/Project64-source/
+tools/python-deps/
+tools/josette/
+
+# ---------------------------------------------------------------------------
+# Artefatos de build e de sondagem / Build and probe artifacts
+# ---------------------------------------------------------------------------
+build/
+lab/
+lab_test/
+sweep/
+prototipos/
+*.exe
+*.obj
+*.lib
+*.map
+*.exp
+*.pdb
+*.log
+*.err
+
+# Relatorios gerados a cada execucao
+RESULTADO.md
+RELATORIO_ULTIMA_SONDA.md
+wpj2_tmp.toml
+
+# ---------------------------------------------------------------------------
+# Ambiente
+# ---------------------------------------------------------------------------
+__pycache__/
+*.pyc
+.vs/
+.vscode/
+*.user
+Thumbs.db
+desktop.ini

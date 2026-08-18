@@ -1,0 +1,43 @@
+# Funcoes cuja versao recompilada e substituida por uma implementacao nativa.
+#
+# O corpo original continua no fonte instrumentado, so que renomeado para
+# `<nome>__replaced` - fica legivel para consulta e nao e chamado por ninguem.
+# A declaracao em funcs.h permanece, entao tanto chamadas diretas quanto
+# indiretas passam a cair na implementacao do runtime.
+#
+# So entra aqui funcao que o N64Recomp nao consegue traduzir *e* cujo
+# comportamento e indispensavel. Um stub silencioso no lugar de qualquer uma
+# destas para o boot.
+func_800CCAE4   # __osDispatchThread: troca de contexto, virou troca de fiber
+func_800CBBB0   # osGetCount: leitura do COP0 Count, ancorada no relogio do host
+func_800CB090   # osPiRawStartDma: a transferencia do cartucho acontece de fato
+func_800CCA8C   # __osEnqueueThread: unico ponto onde se sabe em que fila a thread para
+func_800D5060   # __osEPiRawStartDma: o caminho de DMA que o gerenciador de PI usa
+func_800CD4F0   # __osSiRawStartDma: troca com o PIF, para o jogo enxergar um controle
+func_800CD010   # __osSpSetStatus: SP_STATUS e comando na escrita, nao dado
+func_800CD060   # __osSpRawStartDma: e por aqui que a OSTask fica visivel
+func_800BC6EC   # alocador do heap: wrapper diagnostico preserva o corpo recompilado
+func_800BD218   # copia sincrona de recurso ROM->RDRAM; fila PI ainda nao entrega o payload
+func_800CCC60   # wrapper publico do heap: conserva o chamador do jogo para diagnostico
+func_800CB840   # instrumenta a remocao da thread antes de ela tocar a fila
+func_80090784   # rasterizador de indices CI: wrapper diagnostico preserva o corpo recompilado
+func_80094230   # compositor de glifos/indices: registra o estado que escolhe a cor do atlas
+func_80090E58   # formatador ASCII; ponto opcional de legenda PT-BR
+func_800C4AA0   # osSendMesg: registra a postagem que deve acordar o carregamento inicial
+func_800045AC   # consulta de callback: registra os objetos ativos e o par init/update
+func_8000C584   # carregador da primeira cena: registra o indice procurado e se a tabela aceita a entrada
+func_80004654   # despachante init: registra cada grupo para localizar o par cuja atualizacao nao volta a executar
+func_800C4C40   # osRecvMesg: registra a sequencia de eventos que decide os ramos de func_80000C90
+func_8009908C   # marcador diagnostico: primeira rotina entre 00C90 e 01F54
+func_80098D24   # marcador diagnostico: segunda rotina entre 00C90 e 01F54
+func_80099450   # marcador diagnostico: terceira rotina entre 00C90 e 01F54
+func_80001F54   # marcador diagnostico: guarda que chama 21ED0 no jogo original
+func_80002F20   # marcador diagnostico: retorno que decide o pause_self de 00C90
+func_80098820   # sonda interna do 2F20: primeira chamada antes da divergencia
+func_800C0A40   # sonda interna do 2F20: segunda chamada antes da divergencia
+func_8000BDDC   # wrapper diagnostico ainda requerido por runtime/hle.c
+func_800C143C   # wrapper diagnostico ainda requerido por runtime/hle.c
+func_800C7730   # osAiSetFrequency: entrega a taxa real ao capturador WAV
+func_800C79B0   # osAiGetLength: espelha o consumo continuo do DMA AI
+func_800C7A40   # osAiSetNextBuffer: entrega PCM sintetizado ao capturador WAV
+func_800D54F0   # __osSetCompare: agenda COUNTER pela mesma base de osGetCount

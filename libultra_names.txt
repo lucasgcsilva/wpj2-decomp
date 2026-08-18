@@ -1,0 +1,73 @@
+# Identidades da libultra no Wonder Project J2.
+#
+# Cada linha e uma hipotese com a evidencia ao lado. A evidencia e sempre
+# estrutural - os registradores de hardware que a funcao dirige, ou a forma
+# exata do codigo - nunca o nome de outro jogo. Uma funcao que escreve o bloco
+# VI inteiro mais VI_ORIGIN so pode ser a troca de buffer de video.
+#
+# Formato: 0xVRAM = nome_proposto   # evidencia
+#
+# --- confianca alta: forma do codigo lida instrucao a instrucao ---
+0x800CCAE4 = __osDispatchThread   # restaura 32 GPR + hi/lo + FPU de $k0, mtc0 EPC, eret
+0x800CCAD4 = __osPopThread        # chamada por __osDispatchThread com a fila em $a0
+0x800CBA20 = __osDisableInt       # mfc0 Status, limpa bit IE, devolve o IE antigo em $v0
+0x800CBA40 = __osRestoreInt       # mfc0 Status, or com $a0, mtc0 Status
+0x800CBBB0 = osGetCount           # unica leitura de COP0 Count no segmento
+0x800CC370 = __osException        # le MI_INTR/MI_INTR_MASK e limpa o status de cada dispositivo
+0x800CC958 = __osException_tail   # bloco fora de linha de __osException
+#
+# --- confianca alta: assinatura de registradores inequivoca ---
+0x800CC010 = __osViSwapContext    # escreve o bloco VI inteiro, incluindo VI_ORIGIN
+0x800CBA60 = osViGetCurrentLine   # unica leitura isolada de VI_CURRENT
+0x800CD4F0 = __osSiRawStartDma    # SI_DRAM_ADDR + PIF_ADDR_RD64B + PIF_ADDR_WR64B
+0x800D5500 = __osSiDeviceBusy     # unica leitura isolada de SI_STATUS
+0x800CB090 = osPiRawStartDma      # PI_DRAM_ADDR + PI_CART_ADDR + RD_LEN/WR_LEN
+0x800D5060 = __osEPiRawStartDma   # mesmo conjunto de PI, segunda variante
+0x800D69D0 = osPiSetDomain2       # so temporizacao do dominio 2 (SRAM/flash)
+0x800CD060 = __osSpRawStartDma    # SP_MEM_ADDR + SP_DRAM_ADDR + RD_LEN/WR_LEN
+0x800CD020 = __osSpSetPc          # le SP_STATUS e escreve SP_PC
+0x800CD0F0 = __osSpDeviceBusy     # unica leitura isolada de SP_STATUS
+0x800C5100 = __osDpSetTask        # DPC_START + DPC_END + DPC_STATUS
+0x800CD120 = __osDpGetStatus      # unica leitura isolada de DPC_STATUS
+0x800C7730 = osAiSetFrequency     # AI_DACRATE + AI_BITRATE + AI_CONTROL
+0x800C7A40 = osAiSetNextBuffer    # AI_DRAM_ADDR + AI_LEN
+0x800CF810 = osAiGetLength        # unica leitura isolada de AI_STATUS
+0x800C41A0 = osSetIntMask         # mfc0/mtc0 Status junto com MI_INTR_MASK rw; 15 chamadores
+0x800CC98C = __osEnqueueAndYield  # CORRIGIDO. Chamada com a fila em $a0 por osSendMesg e
+                                  # osRecvMesg logo apos marcar a thread como ESPERANDO.
+                                  # Le MI_INTR_MASK porque salva a mascara no contexto -
+                                  # foi por isso que passou por __osGetGlobalIntMask antes.
+0x800C4AA0 = osSendMesg           # bloqueia quando validCount == msgCount (fila cheia)
+0x800C4C40 = osRecvMesg           # bloqueia quando validCount == 0 (fila vazia)
+#
+# --- confianca media: familia certa, papel exato por confirmar ---
+0x800CB170 = osPiDeviceBusy?      # le PI_STATUS
+0x800D45D0 = osPiDeviceBusy2?     # le PI_STATUS
+0x800D6B20 = osPiDeviceBusy3?     # le PI_STATUS
+0x800D4720 = osCartRomInit?       # le PI_DOM1_LAT, escreve PI_STATUS; sem chamador jal
+0x800D4DC0 = osPiSetDomain1?      # le PI_DOM1_LAT, escreve PI_STATUS
+0x800D54F0 = __osSetCompare?      # unica escrita em COP0 Compare: arma o temporizador
+0x800CF750 = __osProbeTLB?        # le Index/EntryHi/EntryLo/PageMask
+0x800D4570 = osMapTLB?            # escreve Index/EntryHi/EntryLo0/EntryLo1/PageMask
+0x800D4420 = __osSetSR?           # unica escrita direta em Status
+0x800D4430 = __osGetSR?           # unica leitura direta de Status
+#
+# --- confirmadas em execucao, nao so por leitura ---
+0x800C4468 = viMgrMain            # thread criada com prioridade 254 (OS_PRIORITY_VIMGR)
+0x800D5140 = piMgrMain            # thread criada com prioridade 150 (OS_PRIORITY_PIMGR)
+0x800C79C0 = osVirtualToPhysical  # chamada por osPiRawStartDma antes de PI_DRAM_ADDR
+0x800CC8A4 = __osPostEvent        # posta na fila do evento $a0/8 e acorda quem espera
+0x800CCC60 = __osCleanupThread    # o $ra que osCreateThread grava em cada thread
+0x80000450 = thread_game_10       # entrada da thread id=10; nao e alvo de nenhum jal
+#
+# --- globais do SO, lidas do corpo de __osDispatchThread e de __osPostEvent ---
+0x801AFA80 = __osEventStateTab    # 8 bytes por evento: {OSMesgQueue*, OSMesg}
+0x800ECD08 = __osRunQueue         # argumento de __osPopThread
+0x800ECD10 = __osRunningThread    # recebe o resultado do pop
+0x800ECC4C = __OSGlobalIntMask    # mascara combinada com Status e com a tabela RCP
+0x800EFEE0 = __osRcpImTable       # tabela indexada pelo campo rcp da thread
+#
+# --- OSMesgQueue, lido dos deslocamentos que __osPostEvent usa ---
+# +0x00 mtqueue (threads esperando)   +0x04 fullqueue
+# +0x08 validCount                    +0x0C first
+# +0x10 msgCount                      +0x14 vetor de mensagens

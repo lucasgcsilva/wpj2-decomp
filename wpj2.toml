@@ -1,0 +1,29 @@
+# Configuração inicial do N64Recomp para Wonder Project J2.
+# Inclui somente o segmento de CPU residente validado em 2026-08-08.
+
+[input]
+entrypoint = 0x80000400
+symbols_file_path = "wpj2.syms.toml"
+rom_file_path = "E:/projetos/n64-roms/Wonder Project J2 - Koruro no Mori no Jozet (Japan) [T-En by Ryu v1.0].z64"
+output_func_path = "RecompiledFuncs"
+uses_mips3_float_mode = false
+single_file_output = false
+functions_per_output_file = 100
+recomp_include = "#include \"recomp.h\""
+
+[patches]
+# A lista será preenchida somente com instruções que o N64Recomp não puder
+# representar e cujo comportamento seja substituído explicitamente no runtime.
+stubs = [
+    "func_800C4270",
+    "func_800CAFD0",
+    "func_800CBBB0",
+    "func_800CC370",
+    "func_800CCAE4",
+    "func_800CCF90",
+    "func_800CF750",
+    "func_800D44F0",
+    "func_800D4570",
+    "func_800D54F0",
+    "func_800CC958",
+]

@@ -1,0 +1,25 @@
+# Por que cada funcao virou stub. A mensagem e a do proprio N64Recomp; a leitura
+# e minha e esta marcada como tal. Um stub nao implementa nada: ele apenas marca
+# a fronteira entre o codigo recompilado e o runtime que ainda nao existe.
+#
+# Registradores COP0 citados: 9 = Count, 10 = EntryHi, 11 = Compare,
+# 13 = Cause, 14 = EPC.
+#
+# funcao          mensagem do N64Recomp              leitura (nao verificada)
+func_800C4270     Unhandled instruction: cache       inicializacao de cache no boot
+func_800CAFD0     Unhandled instruction: cache       invalidacao de cache
+func_800CCF90     Unhandled instruction: cache       invalidacao de cache
+func_800D44F0     Unhandled instruction: cache       invalidacao de cache
+func_800CBBB0     Unhandled cop0 register mfc0: 9    le Count: candidata a osGetCount
+func_800CC370     Unhandled cop0 register mfc0: 13   le Cause: candidata a __osException
+func_800CC958     Unhandled branch para 0x800CC860   bloco fora de linha de func_800CC370
+func_800CCAE4     Unhandled cop0 register mtc0: 14   escreve EPC: candidata a __osDispatchThread
+func_800CF750     Unhandled cop0 register mfc0: 10   le EntryHi: codigo de TLB
+func_800D4570     Unhandled cop0 register mfc0: 10   le EntryHi: codigo de TLB
+func_800D54F0     Unhandled cop0 register mtc0: 11   escreve Compare: armar temporizador
+#
+# Consequencia pratica: os quatro stubs de `cache` nao tem efeito observavel em
+# um host com coerencia de cache, entao sao inofensivos. Os outros sete nao sao:
+# eles sao exatamente o nucleo da libultra (excecoes, despacho de thread, tempo e
+# TLB). Enquanto forem stubs, o boot roda ate o ponto em que o SO tentaria
+# despachar a primeira thread e para ali - foi o que a sondagem observou.
