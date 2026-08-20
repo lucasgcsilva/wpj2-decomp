@@ -4,7 +4,8 @@ REM  Wonder Project J2 - rodada de laboratorio
 REM
 REM  Um comando so: compila, dispara uma matriz de sondagens em lotes com
 REM  configuracoes diferentes, roda a analise estatica e uma sonda
-REM  dirigida de textura ao fim, e resume tudo em RESULTADO.md.
+REM  dirigida de textura ao fim, e resume tudo em
+REM  temp\projeto\laboratorio\RESULTADO.md.
 REM
 REM  Uso:
 REM     RODAR.bat              20 s por sondagem (padrao)
@@ -29,9 +30,9 @@ set RC=%ERRORLEVEL%
 
 echo.
 if %RC% NEQ 0 (
-   echo  ALGO FALHOU. RESULTADO.md tem o motivo.
+   echo  ALGO FALHOU. temp\projeto\laboratorio\RESULTADO.md tem o motivo.
 ) else (
-   echo  Pronto. Mande o conteudo de RESULTADO.md no chat.
+   echo  Pronto. Resultados em temp\projeto\laboratorio\.
 )
 echo.
 pause

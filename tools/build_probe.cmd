@@ -7,21 +7,21 @@ cd /d "%PROJ%"
 REM A tabela de lookup sai de funcs.h, entao envelhece a cada renomeacao de
 REM funcao. Regenerar sempre e mais barato que depurar um simbolo fantasma.
 echo === regenerando a tabela de funcoes ===
-python "%PROJ%\tools\gen_table.py" "%PROJ%\RecompiledFuncs\funcs.h" "%PROJ%\runtime\func_table.c"
+python "%PROJ%\tools\gen_table.py" "%PROJ%\src\RecompiledFuncs\funcs.h" "%PROJ%\runtime\func_table.c"
 if errorlevel 1 exit /b 1
 
 echo === injetando hooks de traco ===
-python "%PROJ%\tools\trace_inject.py" "%PROJ%\RecompiledFuncs" "%PROJ%\RecompiledFuncsTraced" "%PROJ%\native_overrides.txt"
+python "%PROJ%\tools\trace_inject.py" "%PROJ%\src\RecompiledFuncs" "%PROJ%\src\RecompiledFuncsTraced" "%PROJ%\native_overrides.txt"
 if errorlevel 1 exit /b 1
 
 if exist "%PROJ%\build\objp" rmdir /s /q "%PROJ%\build\objp"
 mkdir "%PROJ%\build\objp" 2>nul
 
-set INC=/I "%RECOMP_INC%" /I "%PROJ%\RecompiledFuncsTraced" /I "%PROJ%\runtime"
+set INC=/I "%RECOMP_INC%" /I "%PROJ%\src\RecompiledFuncsTraced" /I "%PROJ%\runtime"
 set FLAGS=/nologo /c /O1 /std:c17 /MP /DRECOMP_TRACING /DRECOMP_POLLING /wd4101 /wd4102 /wd4189
 
 echo === compilando o CPU recompilado ===
-cl %FLAGS% %INC% "%PROJ%\RecompiledFuncsTraced\funcs_*.c" /Fo"%PROJ%\build\objp\\" >nul
+cl %FLAGS% %INC% "%PROJ%\src\RecompiledFuncsTraced\funcs_*.c" /Fo"%PROJ%\build\objp\\" >nul
 if errorlevel 1 (echo FALHOU A COMPILACAO DOS FONTES RECOMPILADOS & exit /b 1)
 
 echo === compilando o runtime ===
@@ -40,7 +40,7 @@ echo === compilando o RSP nativo (C++) ===
 cl /nologo /c /O2 /std:c++20 /EHsc /MP %INC% ^
    /I "%PROJ%\tools\N64ModernRuntime-source\librecomp\include" ^
    /I "%PROJ%\tools\N64ModernRuntime-source\ultramodern\include" ^
-   "%PROJ%\runtime\rsp_native.cpp" "%PROJ%\analysis\rsp_audio_recompiled.cpp" ^
+   "%PROJ%\runtime\rsp_native.cpp" "%PROJ%\src\gerado\rsp_audio\rsp_audio_recompiled.cpp" ^
    /Fo"%PROJ%\build\objp\\"
 if errorlevel 1 (echo FALHOU O RSP NATIVO & exit /b 1)
 

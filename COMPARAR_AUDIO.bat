@@ -18,15 +18,17 @@ setlocal
 call "%~dp0tools\env.cmd"
 cd /d "%~dp0"
 if "%~1"=="" (set DUR=25) else (set DUR=%~1)
+set "WPJ2_TEMP=%~dp0temp\projeto\comparar_audio"
+if not exist "%WPJ2_TEMP%" mkdir "%WPJ2_TEMP%"
 
 echo.
 echo  Captura pareada - %DUR% s por corrida
 echo  ------------------------------------
 echo.
 echo  Recompilando wpj2_visual.exe com a nova fila de audio...
-call "%~dp0tools\build_visual.cmd" > "%~dp0build_audio.log" 2>&1
+call "%~dp0tools\build_visual.cmd" > "%WPJ2_TEMP%\build_audio.log" 2>&1
 if errorlevel 1 (
-   echo  A BUILD FALHOU. Veja build_audio.log
+   echo  A BUILD FALHOU. Veja temp\projeto\comparar_audio\build_audio.log
    pause
    exit /b 1
 )
@@ -36,6 +38,6 @@ echo.
 python "%~dp0tools\comparar_lote.py" %DUR%
 
 echo.
-echo  Pronto. Mande COMPARACAO_AUDIO.md no chat.
+echo  Pronto. Resultados em temp\projeto\comparar_audio\.
 echo.
 pause

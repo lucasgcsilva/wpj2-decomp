@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 
-ROOT = Path(r"E:\projetos\project-wonder-j2-decomp\oraculo\pj64-rdram\audio_deep")
+ROOT = Path(r"E:\projetos\project-wonder-j2-decomp\temp\oraculo\audio_deep")
 
 
 def main() -> int:

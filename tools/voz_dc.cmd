@@ -23,14 +23,15 @@ for %%V in (0 1 2 3) do (
     call :uma %%V
 )
 echo.
-echo Pronto. WAVs em lab\voz_*.wav
+echo Pronto. WAVs em temp\projeto\audio_vozes\voz_*.wav
 goto :eof
 
 :uma
 setlocal
 set WPJ2_AUDIO_VOICE=%1
-set WPJ2_AUDIO_WAV=%PROJ%\lab\voz_%1.wav
+if not exist "%PROJ%\temp\projeto\audio_vozes" mkdir "%PROJ%\temp\projeto\audio_vozes"
+set WPJ2_AUDIO_WAV=%PROJ%\temp\projeto\audio_vozes\voz_%1.wav
 echo === voz %1 ===
-"%PROJ%\wpj2_probe.exe" "%ROM%" > "%PROJ%\lab\voz_%1.log" 2>&1
+"%PROJ%\wpj2_probe.exe" "%ROM%" > "%PROJ%\temp\projeto\audio_vozes\voz_%1.log" 2>&1
 endlocal
 goto :eof

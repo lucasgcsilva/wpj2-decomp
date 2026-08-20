@@ -14,7 +14,7 @@ import pathlib, struct
 # No nosso caso: 400317499 vs 400317496, diferenca de 3 em 400 milhoes.
 # So a leitura correta reproduz essa proximidade; as erradas embaralham os
 # bytes e destroem a relacao.
-D = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\oraculo\pj64-rdram\audio_replay")
+D = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\analise\oraculo\audio\replay")
 
 def campos(b, fmt, troca):
     d = bytes(b)

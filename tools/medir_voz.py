@@ -4,7 +4,7 @@ import struct, pathlib
 # origem do offset esta no decodificador ADPCM ou na mistura por voz; se todas
 # forem centradas, o DC nasce do acumulo entre vozes ou do anel de reverb.
 TAXA = 22047
-BASE = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\lab")
+BASE = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\temp\projeto\audio_vozes")
 
 def esq(p):
     d = p.read_bytes()[44:]

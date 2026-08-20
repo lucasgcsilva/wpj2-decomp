@@ -32,11 +32,12 @@ if "%WPJ2_BISSECAO_FAIXA%"=="" set WPJ2_BISSECAO_FAIXA=C00:F80
 REM Grava exatamente o PCM entregue ao driver. Serve para separar defeito de
 REM sintese de defeito do caminho de saida: se o WAV estiver limpo e o alto
 REM falante chiar, o problema e do WinMM/driver, nao do RSP.
-set WPJ2_AUDIO_WAV=%PROJ%\lab\saida.wav
+if not exist "%PROJ%\temp\projeto\audio_sonda" mkdir "%PROJ%\temp\projeto\audio_sonda"
+set WPJ2_AUDIO_WAV=%PROJ%\temp\projeto\audio_sonda\saida.wav
 set WPJ2_AUDIO_PLAY=1
 
 echo === sonda de audio: %WPJ2_TIMEOUT% s, fast mode desligado, bissecao=%WPJ2_BISSECAO% ===
-"%PROJ%\wpj2_probe.exe" "%ROM%" > "%PROJ%\lab\audio_env.log" 2>&1
-echo saida: lab\audio_env.log
-findstr /C:"bissecao]" "%PROJ%\lab\audio_env.log"
-findstr /C:"envmix-destinos" "%PROJ%\lab\audio_env.log"
+"%PROJ%\wpj2_probe.exe" "%ROM%" > "%PROJ%\temp\projeto\audio_sonda\audio_env.log" 2>&1
+echo saida: temp\projeto\audio_sonda\audio_env.log
+findstr /C:"bissecao]" "%PROJ%\temp\projeto\audio_sonda\audio_env.log"
+findstr /C:"envmix-destinos" "%PROJ%\temp\projeto\audio_sonda\audio_env.log"

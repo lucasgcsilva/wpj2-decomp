@@ -4,7 +4,7 @@ import struct, pathlib
 # Isso pode ser: (a) atenuacao real do sinal, (b) a captura pegou um trecho
 # silencioso, ou (c) a musica parou. Medir por segundo separa os tres.
 TAXA = 22047
-BASE = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\lab")
+BASE = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\temp\projeto\audio_ab")
 ARQS = ["ab_base.wav", "ab_semround.wav"]
 
 def esq(p):

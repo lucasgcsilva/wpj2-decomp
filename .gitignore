@@ -12,11 +12,23 @@
 
 # Saida do N64Recomp: e uma traducao do codigo de maquina do jogo.
 # Gerada localmente a partir da sua propria copia da ROM.
-RecompiledFuncs/
-RecompiledFuncsTraced/
+src/RecompiledFuncs/
+src/RecompiledFuncsTraced/
 RecompiledRSP/
 runtime/func_table.c
 analysis/
+temp/projeto/
+temp/oraculo/
+temp/quarentena_*/
+
+# Estrutura nova: índices e conclusões podem ser versionados, mas referências
+# extraídas da ROM e código gerado continuam locais.
+analise/oraculo/audio/
+analise/oraculo/graficos/
+analise/oraculo/imagens/
+analise/projeto/codigo/
+analise/projeto/graficos_historico/
+src/gerado/
 
 # Conteudo extraido do jogo
 textos/

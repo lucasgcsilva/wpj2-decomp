@@ -4,7 +4,7 @@ Chamadas diretas entre funcoes recompiladas sao chamadas C normais, entao nunca
 passam pelo lookup do runtime. Para medir quanto do jogo realmente executa,
 copiamos a saida e inserimos um hook no topo de cada corpo de funcao.
 
-A copia e descartavel: `RecompiledFuncs/` continua sendo o artefato de
+A copia e descartavel: `src/RecompiledFuncs/` continua sendo o artefato de
 referencia e nunca e modificado no lugar.
 """
 import os

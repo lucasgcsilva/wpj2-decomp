@@ -5,8 +5,8 @@ import struct, math, pathlib
 # As duas gravacoes comecam em pontos diferentes da musica, entao comparar
 # segundo a segundo nao vale. Usamos metricas independentes de alinhamento:
 # distribuicao do RMS por segundo (percentis) e saturacao normalizada.
-P_PJ64 = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\oraculo\pj64-rdram\audio_deep\pj64_audio_oracle.wav")
-P_NOSSO = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\lab\ab_base.wav")
+P_PJ64 = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\analise\oraculo\audio\deep\pj64_audio_oracle.wav")
+P_NOSSO = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\temp\projeto\testar\audio_rsp_exato\audio_capture.wav")
 TAXA = 22047
 
 def carregar(p):

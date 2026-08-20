@@ -10,8 +10,8 @@ import struct, math, pathlib
 # Nao depende de alinhamento entre as gravacoes, so da natureza do sinal.
 TAXA = 22047
 JAN = TAXA // 20          # janelas de 50 ms
-ARQS = [("Project64", r"E:\projetos\project-wonder-j2-decomp\oraculo\pj64-rdram\audio_deep\pj64_audio_oracle.wav"),
-        ("nosso",     r"E:\projetos\project-wonder-j2-decomp\lab\ab_base.wav")]
+ARQS = [("Project64", r"E:\projetos\project-wonder-j2-decomp\analise\oraculo\audio\deep\pj64_audio_oracle.wav"),
+        ("nosso",     r"E:\projetos\project-wonder-j2-decomp\temp\projeto\testar\audio_rsp_exato\audio_capture.wav")]
 
 def carregar(p):
     d = pathlib.Path(p).read_bytes()[44:]

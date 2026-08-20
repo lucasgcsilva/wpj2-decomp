@@ -2,10 +2,11 @@
 
 Existe para trocar o ciclo lento — uma build, uma corrida, uma analise, repete —
 por um unico disparo que cobre varias frentes ao mesmo tempo e resume tudo em
-`RESULTADO.md`.
+`temp/projeto/laboratorio/RESULTADO.md`.
 
 O resumo e curto de proposito: ele e feito para ser lido por inteiro e decidir o
-proximo passo, nao para guardar tudo. Os logs completos ficam em `lab/`, e sao
+proximo passo, nao para guardar tudo. Os logs completos ficam em
+`temp/projeto/laboratorio/`, e sao
 consultados so quando o resumo apontar para um deles.
 
 Frentes cobertas numa execucao:
@@ -28,7 +29,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 PROJ = Path(__file__).resolve().parent.parent
-LAB = PROJ / "lab"
+LAB = PROJ / "temp" / "projeto" / "laboratorio"
+STATIC = LAB / "analise_estatica"
+RESULTADO = LAB / "RESULTADO.md"
+HW_MAP = LAB / "hw_map.txt"
 EXE = PROJ / "wpj2_probe.exe"
 ROM = next(Path("E:/projetos/n64-roms").glob("Wonder Project J2*.z64"))
 
@@ -274,10 +278,10 @@ def analise_estatica():
     """Roda em paralelo com as sondagens: nao depende delas."""
     with (LAB / "analise.log").open("w", encoding="utf-8", errors="replace") as f:
         subprocess.run([sys.executable, str(PROJ / "tools/analyze_all.py"),
-                        str(ROM), str(PROJ / "wpj2.syms.toml"), str(PROJ / "analysis")],
+                        str(ROM), str(PROJ / "wpj2.syms.toml"), str(STATIC)],
                        cwd=PROJ, stdout=f, stderr=subprocess.STDOUT)
         subprocess.run([sys.executable, str(PROJ / "tools/classify_hw.py"),
-                        str(ROM), str(PROJ / "wpj2.syms.toml"), str(PROJ / "hw_map.txt")],
+                        str(ROM), str(PROJ / "wpj2.syms.toml"), str(HW_MAP)],
                        cwd=PROJ, stdout=f, stderr=subprocess.STDOUT)
     return "analise"
 
@@ -305,7 +309,7 @@ TEMPO = posicionais[0] if posicionais else "20"
 PULAR_BUILD = "--sem-build" in sys.argv
 PULAR_PROFUNDO = "--sem-profundo" in sys.argv
 
-LAB.mkdir(exist_ok=True)
+LAB.mkdir(parents=True, exist_ok=True)
 inicio = time.time()
 print("== laboratorio Wonder Project J2 ==")
 
@@ -318,10 +322,10 @@ else:
     print("build: %s" % ("ok" if rc == 0 and not erros else "FALHOU"))
 
 if erros:
-    (PROJ / "RESULTADO.md").write_text(
-        "# Resultado\n\n## A build falhou\n\n```\n%s\n```\n\nDetalhes em `lab/build.log`.\n"
+    RESULTADO.write_text(
+        "# Resultado\n\n## A build falhou\n\n```\n%s\n```\n\nDetalhes em `temp/projeto/laboratorio/build.log`.\n"
         % "\n".join(erros[:20]), encoding="utf-8")
-    print("\nbuild falhou; RESULTADO.md tem os erros.")
+    print("\nbuild falhou; temp/projeto/laboratorio/RESULTADO.md tem os erros.")
     raise SystemExit(1)
 
 CORRIDAS = montar_corridas(TEMPO)
@@ -413,7 +417,7 @@ for grupo, nome, _e, desc in CORRIDAS:
          m["pixels"], desc))
 w("")
 w("`pixels` = quantos pixels do framebuffer apresentado nao sao pretos. Cada")
-w("corrida grava o quadro em `lab/<nome>_frame.ppm`, que abre em qualquer visor")
+w("corrida grava o quadro em `temp/projeto/laboratorio/<nome>_frame.ppm`, que abre em qualquer visor")
 w("de imagem. E a resposta direta para \"ja aparece alguma coisa?\".")
 w("")
 
@@ -495,7 +499,7 @@ w("```")
 w("")
 
 # Fronteira sobre a uniao: o que nenhuma corrida alcancou.
-(PROJ / "executadas.txt").write_text(
+(LAB / "executadas.txt").write_text(
     "# uniao de todas as corridas\n" +
     "".join("%08X 1\n" % v for v in sorted(uniao)), encoding="utf-8")
 # Leituras repetidas do cartucho: um bloco lido dezenas de vezes e retentativa,
@@ -563,7 +567,7 @@ w("")
 dl = LAB / (melhor + "_displaylist.txt")
 if dl.exists():
     linhas_dl = dl.read_text(encoding="utf-8", errors="replace").splitlines()
-    w("Lista de exibicao completa em `lab/%s_displaylist.txt` (%d comandos, "
+    w("Lista de exibicao completa em `temp/projeto/laboratorio/%s_displaylist.txt` (%d comandos, "
       "sublistas incluidas). Primeiros 30:" % (melhor, len(linhas_dl)))
     w("")
     w("```")
@@ -621,9 +625,9 @@ w("```")
 w("")
 w("## Onde olhar")
 w("")
-w("- logs completos por corrida: `lab/<nome>.log`")
-w("- cobertura por corrida: `lab/<nome>_executadas.txt`")
-w("- callgraph e MMIO: `analysis/`, `hw_map.txt`")
+w("- logs completos por corrida: `temp/projeto/laboratorio/<nome>.log`")
+w("- cobertura por corrida: `temp/projeto/laboratorio/<nome>_executadas.txt`")
+w("- callgraph e MMIO: `temp/projeto/laboratorio/analise_estatica/`, `hw_map.txt`")
 w("- inspecionar uma funcao: `python tools/callee_status.py <vram>`")
 
 profundo = LAB / "ANALISE_PROFUNDA.md"
@@ -632,7 +636,7 @@ if profundo.exists() and not PULAR_PROFUNDO:
     w("")
     w("## Sonda profunda do buffer grafico")
     w("")
-    w("Relatorio completo: `lab/ANALISE_PROFUNDA.md`.")
+    w("Relatorio completo: `temp/projeto/laboratorio/ANALISE_PROFUNDA.md`.")
     for titulo in ("## Veredito de imagem", "## Escritas observadas na primeira pagina de textura",
                    "## Chamadas do rasterizador para o atlas", "## Proxima hipotese verificavel"):
         try:
@@ -652,7 +656,7 @@ if referencia.exists() and not PULAR_PROFUNDO:
     w("")
     w("## Comparacao com o extrator josette")
     w("")
-    w("Relatorio completo: `lab/JOSSETTE_REFERENCIA.md`.")
+    w("Relatorio completo: `temp/projeto/laboratorio/JOSSETTE_REFERENCIA.md`.")
     for s in referencia.read_text(encoding="utf-8", errors="replace").splitlines():
         if s.startswith("- entrada `0x10`") or s.startswith("- melhor paleta") or s.startswith("A TLUT") or s.startswith("Nenhuma coincidencia"):
             w(s)
@@ -662,7 +666,7 @@ if profundo_a.exists() and not PULAR_PROFUNDO:
     w("")
     w("## Sonda profunda de A+START")
     w("")
-    w("Relatorio completo: `lab/ANALISE_PROFUNDA_A_START.md`.")
+    w("Relatorio completo: `temp/projeto/laboratorio/ANALISE_PROFUNDA_A_START.md`.")
     for s in profundo_a.read_text(encoding="utf-8", errors="replace").splitlines():
         if s.startswith("`imagem dos sprites") or s.startswith("- `func_") or s.startswith("O modo `"):
             w(s)
@@ -678,7 +682,7 @@ if profundo_pos.exists() and not PULAR_PROFUNDO:
     w("")
     w("## Sonda profunda apos START (A na leitura 8)")
     w("")
-    w("Relatorio completo: `lab/ANALISE_PROFUNDA_START_A_P8.md`.")
+    w("Relatorio completo: `temp/projeto/laboratorio/ANALISE_PROFUNDA_START_A_P8.md`.")
     for s in profundo_pos.read_text(encoding="utf-8", errors="replace").splitlines():
         if s.startswith("`imagem dos sprites") or s.startswith("- `func_") or s.startswith("O modo `"):
             w(s)
@@ -689,5 +693,5 @@ if referencia_pos.exists() and not PULAR_PROFUNDO:
         if s.startswith("- melhor paleta") or s.startswith("Nenhuma coincidencia"):
             w(s)
 
-(PROJ / "RESULTADO.md").write_text("\n".join(L), encoding="utf-8")
-print("\nRESULTADO.md escrito (%d linhas). Logs completos em lab\\." % len(L))
+RESULTADO.write_text("\n".join(L), encoding="utf-8")
+print("\ntemp/projeto/laboratorio/RESULTADO.md escrito (%d linhas)." % len(L))

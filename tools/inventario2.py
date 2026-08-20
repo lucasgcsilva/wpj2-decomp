@@ -4,7 +4,7 @@ import pathlib, time
 # captura de referencia (preservar) de artefato regeneravel (apagar).
 RAIZ = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp")
 
-for alvo in ["oraculo", "lab", "lab_test", "comparacao"]:
+for alvo in ["temp", "analise", "src", "build"]:
     base = RAIZ / alvo
     if not base.exists():
         continue

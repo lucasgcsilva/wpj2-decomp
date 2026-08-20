@@ -110,6 +110,8 @@ uint64_t rsp_tasks_tipo(int tipo);
  * proxima AList de audio, cuja entrada completa podera ser confrontada com o
  * mesmo instante capturado no Project64. */
 void     rsp_request_audio_state_capture(void);
+void     rsp_audio_probe_ai_buffer(uint8_t* rdram, uint32_t address, uint32_t bytes);
+void     rsp_audio_probe_flush(void);
 /* Telemetria de custo do rasterizador. So e observada quando um chamador pede
    um arquivo de status; nao muda a ordem nem o conteudo das listas RDP. */
 uint64_t rsp_gfx_raster_last_us(void);
@@ -172,6 +174,7 @@ void     audio_shutdown(void);
 void     audio_set_frequency(uint32_t hz);
 void     audio_queue_ai_buffer(uint8_t* rdram, uint32_t address, uint32_t bytes);
 uint32_t audio_ai_length(void);
+uint32_t audio_ai_status(void);
 uint64_t audio_buffers_queued(void);
 uint64_t audio_bytes_queued(void);
 uint32_t audio_peak_sample(void);

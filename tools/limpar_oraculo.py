@@ -8,7 +8,7 @@ import pathlib, shutil, sys
 #
 # PRESERVA o pj64_audio_oracle.wav e os manifestos - sao a referencia de
 # audio que ainda usamos em comparar_pj64.py.
-BASE = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\oraculo\pj64-rdram")
+BASE = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\temp\oraculo")
 APLICAR = len(sys.argv) > 1 and sys.argv[1] == "aplicar"
 
 alvos = []

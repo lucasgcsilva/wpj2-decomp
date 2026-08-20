@@ -54,7 +54,7 @@ typedef struct {
 } video_checkpoint_header_t;
 
 static int video_checkpoint_path(char* path, size_t capacity) {
-    char pasta[MAX_PATH] = "lab_test";
+    char pasta[MAX_PATH] = "temp\\projeto\\testar";
     DWORD n = GetEnvironmentVariableA("WPJ2_CAPTURE_DIR", pasta, sizeof(pasta));
     if (n >= sizeof(pasta)) return 0;
     CreateDirectoryA(pasta, NULL);
@@ -185,7 +185,7 @@ static void video_write_bmp(const char* nome, const uint32_t* pixels) {
  * que escala da janela, bordas ou outra aplicacao contaminem a comparacao. */
 static void video_capture_f5(void) {
     if (!g_last_rdram || !g_last_width || !g_last_height) return;
-    char pasta[MAX_PATH] = "lab_test";
+    char pasta[MAX_PATH] = "temp\\projeto\\testar";
     DWORD n = GetEnvironmentVariableA("WPJ2_CAPTURE_DIR", pasta, sizeof(pasta));
     if (n >= sizeof(pasta)) return;
     CreateDirectoryA(pasta, NULL);
@@ -230,7 +230,7 @@ static void video_capture_f5(void) {
 
 static void video_capture_history_f6(void) {
     if (!g_history_count) return;
-    char pasta[MAX_PATH] = "lab_test";
+    char pasta[MAX_PATH] = "temp\\projeto\\testar";
     DWORD n = GetEnvironmentVariableA("WPJ2_CAPTURE_DIR", pasta, sizeof(pasta));
     if (n >= sizeof(pasta)) return;
     CreateDirectoryA(pasta, NULL);
@@ -445,6 +445,15 @@ static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProc(hwnd, msg, wp, lp);
 }
 
+void video_pump_messages(void) {
+    if (!g_video_enabled || !g_video_window) return;
+    MSG msg;
+    while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+}
+
 int video_init(void) {
     WNDCLASSA wc = {0};
     wc.lpfnWndProc = video_wndproc;
@@ -487,11 +496,7 @@ void video_present(uint8_t* rdram, uint32_t origin, uint32_t width,
     if (!g_video_enabled || !g_video_window || !rdram || format != 2 || !width ||
         !height || height > VIDEO_H)
         return;
-    MSG msg;
-    while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-    }
+    video_pump_messages();
     if (!g_video_window) return;
 
     /* A tarefa gráfica pode terminar muitas vezes entre duas apresentações.

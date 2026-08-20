@@ -1,7 +1,7 @@
 """A fronteira da execucao: o que o codigo alcancado chama e nunca foi alcancado.
 
 Cruza `executadas.txt` (gravado pelo runtime ao final de cada corrida) com
-`analysis/callgraph.txt`. O resultado e a lista de funcoes que estao a exatamente
+`analise/projeto/codigo/callgraph.txt`. O resultado e a lista de funcoes que estao a exatamente
 uma chamada de distancia do que ja roda — ordenada por quantos chamadores
 executados apontam para elas.
 
@@ -15,15 +15,20 @@ from pathlib import Path
 
 proj = Path(__file__).resolve().parent.parent
 
+executed_path = proj / "temp" / "projeto" / "laboratorio" / "executadas.txt"
+graph_path = proj / "temp" / "projeto" / "laboratorio" / "analise_estatica" / "callgraph.txt"
+if not graph_path.exists():
+    graph_path = proj / "analise" / "projeto" / "codigo" / "callgraph.txt"
+
 executed = {}
-for line in (proj / "executadas.txt").read_text(encoding="utf-8").splitlines():
+for line in executed_path.read_text(encoding="utf-8").splitlines():
     if line.startswith("#") or not line.strip():
         continue
     vram, calls = line.split()
     executed[int(vram, 16)] = int(calls)
 
 graph = {}
-for line in (proj / "analysis" / "callgraph.txt").read_text(encoding="utf-8").splitlines():
+for line in graph_path.read_text(encoding="utf-8").splitlines():
     if line.startswith("#") or "->" not in line:
         continue
     src, rest = line.split("->", 1)

@@ -16,7 +16,7 @@ from collections import Counter
 from pathlib import Path
 
 PROJ = Path(__file__).resolve().parent.parent
-LAB = PROJ / "lab"
+LAB = PROJ / "temp" / "projeto" / "laboratorio"
 EXE = PROJ / "wpj2_probe.exe"
 ROM = next(Path("E:/projetos/n64-roms").glob("Wonder Project J2*.z64"))
 
@@ -91,7 +91,7 @@ def main() -> int:
     w("")
     w("`%s`" % image)
     w("")
-    w(("PPMs foram gerados em `lab/profundo_%s_*.ppm`, mas so contam como imagem"
+    w(("PPMs foram gerados em `temp/projeto/laboratorio/profundo_%s_*.ppm`, mas so contam como imagem"
        " visivel quando houver texel RGB diferente de preto.") % args.nome)
     w("")
     w("## Escritas observadas na primeira pagina de textura")

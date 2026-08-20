@@ -4,7 +4,7 @@ import struct, math, pathlib, sys
 # de 16 bits = "pipoco") e o RMS por segundo (energia somada em excesso).
 # O cabecalho declara 0 quadros porque audio_shutdown nao roda sob
 # TerminateProcess; lemos pelo tamanho do arquivo.
-LAB = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\lab")
+LAB = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\temp\projeto\audio_ab")
 TAXA = 22047
 
 def carregar(nome):

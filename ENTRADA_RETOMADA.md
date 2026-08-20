@@ -18,7 +18,7 @@ JOGAR.bat 300 audio  o mesmo, com síntese completa
 Teclas: **Enter**=START, **X**/Espaço=A, **Z**=B, **C**=Z, **A**/**S**=L/R,
 setas=direcional. F5 captura quadro, F11 alterna voz do áudio.
 
-Ao fechar, o `.bat` resume três números do `lab\jogar.log`: teclas que
+Ao fechar, o `.bat` resume três números de `temp\projeto\jogar\jogar.log`: teclas que
 chegaram ao runtime, leituras que o jogo pediu, e valores que ele recebeu.
 
 ---
@@ -85,7 +85,7 @@ São duas camadas. **A do host nós já temos** (o `WndProc` no `video.c` e o
 ## ✅ Funções localizadas (passo 1 concluído)
 
 Encontradas buscando `func_800CD4F0` (o `__osSiRawStartDma`) **no código
-recompilado**, em `RecompiledFuncs\funcs_33.c` — não pelo `ra`, que é inútil
+recompilado**, em `src\RecompiledFuncs\funcs_33.c` — não pelo `ra`, que é inútil
 com fibers.
 
 As chamadas aparecem como comentário do endereço original:

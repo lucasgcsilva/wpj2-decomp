@@ -40,7 +40,7 @@ static bool read_ai_address(const std::string& path, uint32_t& address) {
 }
 
 int main(int argc, char** argv) {
-    const std::string root = argc >= 2 ? argv[1] : "lab_test/audio_deep_oracle/task_000300_full";
+    const std::string root = argc >= 2 ? argv[1] : "temp/projeto/audio_deep_oracle/task_000300_full";
     const std::string sep = root.empty() || root.back() == '/' || root.back() == '\\' ? "" : "/";
     std::vector<uint8_t> logical_rdram, logical_task, expected;
     if (!read_file(root + sep + "rdram.bin", logical_rdram) || logical_rdram.size() != 0x800000) {

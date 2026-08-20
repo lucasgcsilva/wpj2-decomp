@@ -1,7 +1,7 @@
 import json
 import re
 
-json_path = r'E:\projetos\project-wonder-j2-decomp\textos\dialogos_en_extraidos_gemini.json'
+json_path = r'E:\projetos\project-wonder-j2-decomp\textos\dialogos_ptbr.json'
 with open(json_path, 'r', encoding='utf-8') as f:
     data = json.load(f)
 

@@ -66,15 +66,14 @@ static uint32_t g_ai_len_initial;
  * O construtor arredonda a cada 16 frames; estes restantes produzem exatamente
  * 720,736,752,752,736,720 frames, a sequencia do AI do Project64. */
 static int g_ai_virtual_cadence;
+static int g_ai_vi_cadence;
+static uint32_t g_ai_vi_phase = 1;
 static uint32_t g_ai_virtual_remaining;
 static uint32_t g_ai_virtual_phase;
 static uint64_t g_ai_fifo_full_drops;
-/* A fila temporizada e util para validar a emulacao do AI, mas esta ROM ainda
- * acessa os registradores AI diretamente nas rotinas libultra recompiladas.
- * Sem o espelho completo de AI_STATUS/AI_LEN, ela deixa de submeter novos
- * buffers depois do bootstrap. O modo padrao, portanto, conserva a entrega
- * compativel no proximo VI; a fila fisica fica disponivel para testes com
- * WPJ2_AI_TIMED=1, sem sacrificar a musica no executavel normal. */
+/* A AI real possui dois slots. O modo temporizado modela BUSY/FIFO_FULL e a
+ * duracao do DMA; osAiSetNextBuffer consulta esse estado pelo wrapper nativo
+ * de __osAiDeviceBusy, seguindo a implementacao de referencia do libreultra. */
 static int g_ai_timed;
 static int g_ai_compat_pending;
 /* Modo de sondagem: preserva a aceitaçao compatível de osAiSetNextBuffer,
@@ -141,7 +140,28 @@ uint32_t audio_ai_length(void) {
         uint64_t safety = ((uint64_t)g_rate / 120u) * 4u;
         return (uint32_t)(bytes > safety ? bytes - safety : 0u);
     }
+    if (g_ai_vi_cadence) {
+        /* O construtor de ALists desperta aproximadamente a cada dois VIs.
+         * Indexar o ciclo pelo tempo emulado impede que uma tarefa host mais
+         * lenta desloque todas as fases seguintes. */
+        static const uint16_t remaining[] = { 416, 352, 288, 288, 352, 416 };
+        uint64_t audio_tick = hle_retraces() / 2u;
+        return remaining[(audio_tick + g_ai_vi_phase) %
+                         (sizeof(remaining) / sizeof(remaining[0]))];
+    }
     if (g_ai_virtual_cadence) return g_ai_virtual_remaining;
+    if (g_ai_timed) {
+        if (!g_ai_primary_bytes || !g_ai_freq.QuadPart) return 0;
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        if (now.QuadPart >= g_ai_due.QuadPart) return 0;
+        uint64_t ticks = (uint64_t)(g_ai_due.QuadPart - now.QuadPart);
+        uint64_t bytes = (ticks * (uint64_t)g_rate * 4u +
+                          (uint64_t)g_ai_freq.QuadPart - 1u) /
+                         (uint64_t)g_ai_freq.QuadPart;
+        if (bytes > g_ai_primary_bytes) bytes = g_ai_primary_bytes;
+        return (uint32_t)bytes & ~7u;
+    }
     if (!g_ai_len_initial) return 0;
     audio_ai_clock_init();
     LARGE_INTEGER now;
@@ -151,6 +171,15 @@ uint32_t audio_ai_length(void) {
     uint64_t consumed = (elapsed * (uint64_t)g_rate * 4u) / (uint64_t)g_ai_freq.QuadPart;
     if (consumed >= g_ai_len_initial) return 0;
     return (uint32_t)(g_ai_len_initial - consumed) & ~1u;
+}
+
+uint32_t audio_ai_status(void) {
+    if (!g_ai_timed) return 0;
+    uint32_t status = 0;
+    if (g_ai_primary_bytes) status |= 0x40000000u; /* AI_STATUS_DMA_BUSY */
+    if (g_ai_primary_bytes && g_ai_secondary_bytes)
+        status |= 0x80000000u;                    /* AI_STATUS_FIFO_FULL */
+    return status;
 }
 
 static void put_u16(FILE* f, uint16_t v) {
@@ -303,6 +332,12 @@ void audio_init(void) {
         g_ai_virtual_cadence = virtual_cadence && *virtual_cadence &&
                                *virtual_cadence != '0';
     }
+    {
+        const char* vi_cadence = getenv("WPJ2_AI_VI_CADENCE");
+        g_ai_vi_cadence = vi_cadence && *vi_cadence && *vi_cadence != '0';
+        const char* vi_phase = getenv("WPJ2_AI_VI_PHASE");
+        if (vi_phase && *vi_phase) g_ai_vi_phase = (uint32_t)atoi(vi_phase) % 6u;
+    }
     g_ai_due.QuadPart = 0;
     g_buffer_index = 0;
     g_buffer_dir[0] = 0;
@@ -324,7 +359,7 @@ void audio_init(void) {
     const char* enable = getenv("WPJ2_AUDIO");
     if (!enable || !*enable || *enable == '0') return;
     const char* path = getenv("WPJ2_AUDIO_WAV");
-    if (!path || !*path) path = "lab\\audio_capture.wav";
+    if (!path || !*path) path = "temp\\projeto\\audio_capture.wav";
     g_wav = fopen(path, "wb");
     if (!g_wav) {
         printf("[audio] nao foi possivel criar %s\n", path);
@@ -347,6 +382,7 @@ void audio_shutdown(void) {
         fclose(g_buffer_manifest);
         g_buffer_manifest = NULL;
     }
+    rsp_audio_probe_flush();
     if (!g_wav) return;
     if (g_bytes > UINT32_MAX) g_bytes = UINT32_MAX;
     fseek(g_wav, 0, SEEK_SET);
@@ -373,9 +409,11 @@ void audio_queue_ai_buffer(uint8_t* rdram, uint32_t address, uint32_t bytes) {
        estereo sobrando e desloca a fase de todo o buffer seguinte. */
     bytes &= ~7u;
     audio_ai_clock_init();
-    QueryPerformanceCounter(&g_ai_len_started);
-    g_ai_len_initial = bytes;
-    if (g_ai_virtual_cadence) {
+    if (!g_ai_timed) {
+        QueryPerformanceCounter(&g_ai_len_started);
+        g_ai_len_initial = bytes;
+    }
+    if (g_ai_virtual_cadence && !g_ai_vi_cadence) {
         static const uint16_t remaining[] = { 416, 352, 288, 288, 352, 416 };
         g_ai_virtual_remaining = remaining[g_ai_virtual_phase++ %
                                            (sizeof(remaining) / sizeof(remaining[0]))];
@@ -414,6 +452,9 @@ void audio_queue_ai_buffer(uint8_t* rdram, uint32_t address, uint32_t bytes) {
             g_ai_compat_pending = 1;
         }
     }
+    /* Sonda passiva: compara o PCM que saiu do RSP com os mesmos bytes no
+       instante em que osAiSetNextBuffer os entrega ao dispositivo AI. */
+    rsp_audio_probe_ai_buffer(rdram, p, bytes);
     /* A interrupcao AI faz parte da emulacao mesmo quando a captura WAV esta
        desligada. O arquivo e apenas uma observacao opcional. */
     if (g_play_enabled) audio_play_buffer(rdram, p, bytes);

@@ -1,10 +1,10 @@
 import pathlib, time
 
-# Detalha oraculo/pj64-rdram, onde estao 615 mil arquivos. Separar a captura
+# Detalha temp/oraculo, onde ficam apenas capturas ainda não processadas.
 # de referencia que ainda vale (o WAV do Project64) dos despejos por buffer,
 # que so fariam falta se a comparacao com o PJ64 fosse retomada - e ela foi
 # descartada (ANALISE_AUDIO.md, secao 5b).
-base = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\oraculo\pj64-rdram")
+base = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\temp\oraculo")
 
 itens = []
 for d in sorted(base.iterdir()):

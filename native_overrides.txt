@@ -40,4 +40,5 @@ func_800C143C   # wrapper diagnostico ainda requerido por runtime/hle.c
 func_800C7730   # osAiSetFrequency: entrega a taxa real ao capturador WAV
 func_800C79B0   # osAiGetLength: espelha o consumo continuo do DMA AI
 func_800C7A40   # osAiSetNextBuffer: entrega PCM sintetizado ao capturador WAV
+func_800CF810   # __osAiDeviceBusy: espelha AI_STATUS_FIFO_FULL da fila virtual
 func_800D54F0   # __osSetCompare: agenda COUNTER pela mesma base de osGetCount

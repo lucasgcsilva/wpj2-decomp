@@ -4,7 +4,7 @@ import re, collections, pathlib
 # por opcode, quais bytes de flags (w0 >> 16 & 0xFF) a ROM realmente emite.
 # O HLE decide ramos por igualdade em alguns comandos; o Project64 decide por
 # teste de bit. Qualquer flags fora do conjunto tratado vira comando ignorado.
-LAB = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\lab")
+LAB = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\temp\projeto\laboratorio")
 RX = re.compile(r"\[acmd\]\s+\d+\s+(\S+)\s+w0=0x([0-9A-Fa-f]{8})\s+w1=0x([0-9A-Fa-f]{8})")
 
 por_op = collections.defaultdict(collections.Counter)

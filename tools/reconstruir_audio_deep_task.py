@@ -12,8 +12,8 @@ import sys
 from pathlib import Path
 
 
-DEFAULT_ROOT = Path(r"E:\projetos\project-wonder-j2-decomp\oraculo\pj64-rdram\audio_deep")
-DEFAULT_OUTPUT = Path(r"E:\projetos\project-wonder-j2-decomp\lab_test\audio_deep_oracle")
+DEFAULT_ROOT = Path(r"E:\projetos\project-wonder-j2-decomp\analise\oraculo\audio\deep")
+DEFAULT_OUTPUT = Path(r"E:\projetos\project-wonder-j2-decomp\temp\projeto\audio_deep_oracle")
 ADDRESS = re.compile(r"_([0-9A-Fa-f]{8})\.bin$")
 
 
@@ -49,7 +49,36 @@ def main() -> int:
     list_address = be32(task, 0x30) & 0x1FFFFFFF
     if len(task) < 0x40 or list_address + len(alist) > 0x800000:
         raise SystemExit("OSTask/AList inválida")
-    rdram = bytearray(0x800000)
+    # Quando a sonda preservou uma imagem integral exatamente antes desta
+    # tarefa, ela é uma base mais forte que a reconstrução mínima: inclui o
+    # ucode_data e tabelas indiretas que uma AList grande pode alcançar sem
+    # expô-las como LOADBUFF. Sem isso o RSP pode saltar para 0 e a falha seria
+    # confundida com divergência de áudio.
+    snapshot = root / "snapshots" / f"rdram_before_task_{task_number:06d}.bin"
+    snapshots = sorted(
+        candidate
+        for candidate in (root / "snapshots").glob("rdram_before_task_*.bin")
+        if candidate.stat().st_size == 0x800000
+    )
+    if snapshot.exists() and snapshot.stat().st_size == 0x800000:
+        rdram = bytearray(snapshot.read_bytes())
+        base = "snapshot integral exato"
+    elif snapshots:
+        # O ucode_data, a tabela FIR e outros blocos estáticos não aparecem
+        # como LOADBUFF na AList. Um snapshot de outra tarefa fornece essa
+        # base; todos os blocos mutáveis observados pela sonda desta tarefa
+        # são sobrepostos logo abaixo com os arquivos *_cmd*.bin.
+        snapshot = min(
+            snapshots,
+            key=lambda candidate: abs(
+                int(candidate.stem.rsplit("_", 1)[-1]) - task_number
+            ),
+        )
+        rdram = bytearray(snapshot.read_bytes())
+        base = f"snapshot integral auxiliar {snapshot.stem.rsplit('_', 1)[-1]}"
+    else:
+        rdram = bytearray(0x800000)
+        base = "reconstrução mínima"
     rdram[list_address:list_address + len(alist)] = alist
     blocks = 0
     for file in task_dir.glob("*.bin"):
@@ -73,7 +102,7 @@ def main() -> int:
         f"source=audio_deep task {task_number}; blocks={blocks}\r\n",
         encoding="ascii",
     )
-    print(f"{output}: AList=0x{list_address:08X}, blocos={blocks}, AI={ai_index}")
+    print(f"{output}: AList=0x{list_address:08X}, blocos={blocks}, AI={ai_index}, base={base}")
     return 0
 
 

@@ -55,14 +55,15 @@ REM dobrar as leituras, a conclusao do SI esta presa ao evento de video.
 if not "%~3"=="" set WPJ2_RETRACE=%~3
 
 REM Quadros salvos permitem ver em qual tela paramos, sem abrir janela.
-set WPJ2_OUT=%PROJ%\lab\menu_
+if not exist "%PROJ%\temp\projeto\menu" mkdir "%PROJ%\temp\projeto\menu"
+set WPJ2_OUT=%PROJ%\temp\projeto\menu\menu_
 set WPJ2_FRAME_SAMPLES=8
 set WPJ2_AUDIO=
 set WPJ2_AUDIO_FAST=1
 
 echo === sequencia de menu: %DUR% s, roteiro="%~2" ===
-"%PROJ%\wpj2_probe.exe" "%ROM%" > "%PROJ%\lab\menu.log" 2>&1
+"%PROJ%\wpj2_probe.exe" "%ROM%" > "%PROJ%\temp\projeto\menu\menu.log" 2>&1
 echo.
-findstr /C:"entr :" /C:"estado" /C:"leituras de controle" "%PROJ%\lab\menu.log"
+findstr /C:"entr :" /C:"estado" /C:"leituras de controle" "%PROJ%\temp\projeto\menu\menu.log"
 echo --- quadros gerados ---
-dir /b "%PROJ%\lab\menu_*.ppm" 2>nul
+dir /b "%PROJ%\temp\projeto\menu\menu_*.ppm" 2>nul

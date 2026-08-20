@@ -2965,6 +2965,505 @@ static void acmd_capture_state_dir(uint8_t* rdram, uint32_t phys, uint32_t bytes
     }
 }
 
+/* Traço profundo sem perturbar a cadência.
+ *
+ * Abrir milhares de arquivos de estado durante a música muda o escalonamento
+ * que se deseja medir. Este formato grava em um único CSV somente FNV-1a da
+ * AList e dos estados persistentes anteriores a ela. O conteúdo bruto pode
+ * ser coletado depois, apenas na primeira tarefa divergente. */
+static uint64_t acmd_fnv1a_logical(const uint8_t* src, uint32_t bytes) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (uint32_t i = 0; i < bytes; ++i) {
+        hash ^= src[i ^ 3u];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static int acmd_seen_state(uint32_t* states, unsigned count, uint32_t state) {
+    for (unsigned i = 0; i < count; ++i) if (states[i] == state) return 1;
+    return 0;
+}
+
+static void acmd_deep_hash_trace(uint8_t* rdram, uint32_t phys, uint32_t bytes,
+                                 unsigned task_index) {
+    static FILE* out;
+    static int initialized;
+    static unsigned rows_written;
+    if (!initialized) {
+        initialized = 1;
+        const char* path = getenv("WPJ2_NATIVE_AUDIO_DEEP_TRACE");
+        if (path && *path) out = fopen(path, "wb");
+        if (out) {
+            setvbuf(out, NULL, _IOFBF, 64u * 1024u);
+            fprintf(out, "task,bytes,alist_fnv,adpcm,resample,envmix\n");
+            fflush(out);
+        }
+    }
+    if (!out) return;
+
+    uint32_t segs[16];
+    memcpy(segs, g_audio_segment, sizeof(segs));
+    uint32_t adpcm[8] = {0}, resample[8] = {0}, envmix[8] = {0};
+    unsigned n_adpcm = 0, n_resample = 0, n_envmix = 0;
+    for (uint32_t i = 0; i < bytes / 8u; ++i) {
+        uint32_t w0 = *(uint32_t*)(rdram + phys + i * 8u);
+        uint32_t w1 = *(uint32_t*)(rdram + phys + i * 8u + 4u);
+        uint32_t op = w0 >> 24;
+        if (op == 7u) {
+            segs[(w0 >> 16) & 15u] = w1 & 0x1FFFFFFFu;
+            continue;
+        }
+        uint32_t segment = (w1 >> 24) & 0x3Fu;
+        uint32_t state = (segment < 16u ? segs[segment] : 0u) + (w1 & 0xFFFFFFu);
+        uint32_t* states = NULL;
+        unsigned* count = NULL;
+        uint32_t size = 0;
+        if (op == 1u) { states = adpcm; count = &n_adpcm; size = 32u; }
+        else if (op == 5u) { states = resample; count = &n_resample; size = 10u; }
+        else if (op == 3u) { states = envmix; count = &n_envmix; size = 80u; }
+        if (!states || *count >= 8u || state + size > 0x800000u ||
+            acmd_seen_state(states, *count, state)) continue;
+        states[(*count)++] = state;
+    }
+
+    fprintf(out, "%u,%u,%016llX,", task_index, bytes,
+            (unsigned long long)acmd_fnv1a_logical(rdram + phys, bytes));
+    const uint32_t* groups[] = { adpcm, resample, envmix };
+    const unsigned counts[] = { n_adpcm, n_resample, n_envmix };
+    const uint32_t sizes[] = { 32u, 10u, 80u };
+    for (unsigned group = 0; group < 3u; ++group) {
+        for (unsigned i = 0; i < counts[group]; ++i) {
+            uint32_t state = groups[group][i];
+            fprintf(out, "%s%08X=%016llX", i ? "/" : "", state,
+                    (unsigned long long)acmd_fnv1a_logical(
+                        rdram + state, sizes[group]));
+        }
+        fprintf(out, "%s", group == 2u ? "\n" : ",");
+    }
+    /* Uma sincronização a cada ~0,5 s mantém o arquivo recuperável mesmo se
+       a janela for encerrada pelo botão X, sem I/O por tarefa. */
+    if ((++rows_written & 15u) == 0u) fflush(out);
+}
+
+/* Sonda de continuidade dos históricos de áudio.
+ *
+ * O replay offline demonstrou que o RSP recompilado produz o PCM correto
+ * quando recebe a mesma memória do Project64. A pergunta restante é onde a
+ * execução ao vivo perde essa memória. Para cada estado persistente usado por
+ * ADPCM, RESAMPLE e ENVMIXER, guardamos o valor logo após uma tarefa e o
+ * confrontamos com o valor logo antes da próxima tarefa que reutiliza o mesmo
+ * endereço. Uma diferença nesse intervalo não foi causada pelo RSP atual.
+ *
+ * O CSV é bufferizado e os dados brutos são gravados somente nas primeiras
+ * oito mudanças entre tarefas. Assim uma rodada responde várias hipóteses sem
+ * despejar milhares de arquivos nem mudar sensivelmente a cadência. */
+#define ACMD_PROBE_CURRENT_MAX 24u
+#define ACMD_PROBE_TRACKED_MAX 128u
+#define ACMD_PROBE_RAW_MAX 80u
+#define ACMD_PROBE_PCM_RING 16u
+#define ACMD_PROBE_CAPTURE_MAX 8u
+
+typedef struct {
+    uint32_t address, size, previous_task, capture_index;
+    uint8_t type;
+    uint64_t previous_hash, before_hash;
+    int had_previous, changed_between;
+} acmd_probe_current_t;
+
+typedef struct {
+    uint32_t address, size, last_task;
+    uint8_t type, valid, raw[ACMD_PROBE_RAW_MAX];
+    uint64_t last_hash;
+} acmd_probe_tracked_t;
+
+typedef struct {
+    uint32_t task, address, bytes;
+    uint64_t hash;
+    int valid, consumed;
+} acmd_probe_pcm_t;
+
+static int g_acmd_probe_initialized, g_acmd_probe_enabled;
+static char g_acmd_probe_dir[MAX_PATH];
+static FILE* g_acmd_probe_states;
+static FILE* g_acmd_probe_pcm;
+static unsigned g_acmd_probe_rows, g_acmd_probe_captures;
+static int g_acmd_probe_baseline_captured;
+static uint32_t g_acmd_probe_baseline_task, g_acmd_probe_suspect_task;
+static int g_acmd_probe_suspect_captured;
+static acmd_probe_current_t g_acmd_probe_current[ACMD_PROBE_CURRENT_MAX];
+static unsigned g_acmd_probe_current_count;
+static uint32_t g_acmd_probe_current_task;
+static uint64_t g_acmd_probe_current_alist;
+static acmd_probe_tracked_t g_acmd_probe_tracked[ACMD_PROBE_TRACKED_MAX];
+static unsigned g_acmd_probe_tracked_count;
+static acmd_probe_pcm_t g_acmd_probe_pcm_ring[ACMD_PROBE_PCM_RING];
+static unsigned g_acmd_probe_pcm_head;
+
+static const char* acmd_probe_type_name(uint8_t type) {
+    switch (type) {
+        case 1: return "adpcm";
+        case 2: return "resample";
+        case 3: return "envmix";
+        default: return "unknown";
+    }
+}
+
+static void acmd_probe_init(void) {
+    if (g_acmd_probe_initialized) return;
+    g_acmd_probe_initialized = 1;
+    const char* dir = getenv("WPJ2_AUDIO_FIRST_DIVERGENCE_DIR");
+    if (!dir || !*dir) return;
+    strncpy(g_acmd_probe_dir, dir, sizeof(g_acmd_probe_dir) - 1u);
+    g_acmd_probe_dir[sizeof(g_acmd_probe_dir) - 1u] = 0;
+    CreateDirectoryA(g_acmd_probe_dir, NULL);
+    char path[MAX_PATH + 48];
+    snprintf(path, sizeof(path), "%s\\state_continuity.csv", g_acmd_probe_dir);
+    g_acmd_probe_states = fopen(path, "wb");
+    snprintf(path, sizeof(path), "%s\\pcm_lifetime.csv", g_acmd_probe_dir);
+    g_acmd_probe_pcm = fopen(path, "wb");
+    if (!g_acmd_probe_states || !g_acmd_probe_pcm) {
+        if (g_acmd_probe_states) fclose(g_acmd_probe_states);
+        if (g_acmd_probe_pcm) fclose(g_acmd_probe_pcm);
+        g_acmd_probe_states = g_acmd_probe_pcm = NULL;
+        return;
+    }
+    setvbuf(g_acmd_probe_states, NULL, _IOFBF, 64u * 1024u);
+    setvbuf(g_acmd_probe_pcm, NULL, _IOFBF, 16u * 1024u);
+    fprintf(g_acmd_probe_states,
+            "task,alist_fnv,result,type,address,bytes,previous_task,previous_after_fnv,before_fnv,after_fnv,changed_between,changed_by_rsp,capture\n");
+    fprintf(g_acmd_probe_pcm,
+            "stage,task,address,bytes,rsp_after_fnv,observed_fnv,changed_or_unmatched\n");
+    fflush(g_acmd_probe_states);
+    fflush(g_acmd_probe_pcm);
+    g_acmd_probe_enabled = 1;
+}
+
+static acmd_probe_tracked_t* acmd_probe_find_tracked(uint8_t type,
+                                                     uint32_t address,
+                                                     uint32_t size) {
+    for (unsigned i = 0; i < g_acmd_probe_tracked_count; ++i) {
+        acmd_probe_tracked_t* item = &g_acmd_probe_tracked[i];
+        if (item->type == type && item->address == address && item->size == size)
+            return item;
+    }
+    if (g_acmd_probe_tracked_count >= ACMD_PROBE_TRACKED_MAX) return NULL;
+    acmd_probe_tracked_t* item = &g_acmd_probe_tracked[g_acmd_probe_tracked_count++];
+    memset(item, 0, sizeof(*item));
+    item->type = type;
+    item->address = address;
+    item->size = size;
+    return item;
+}
+
+static int acmd_probe_current_seen(uint8_t type, uint32_t address) {
+    for (unsigned i = 0; i < g_acmd_probe_current_count; ++i)
+        if (g_acmd_probe_current[i].type == type &&
+            g_acmd_probe_current[i].address == address) return 1;
+    return 0;
+}
+
+static void acmd_probe_write_logical_file(const char* path, const uint8_t* data,
+                                          uint32_t bytes) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    acmd_write_logical(f, data, bytes);
+    fclose(f);
+}
+
+static void acmd_probe_capture_between(uint8_t* rdram, uint32_t phys,
+                                       uint32_t alist_bytes,
+                                       acmd_probe_current_t* current,
+                                       const acmd_probe_tracked_t* tracked) {
+    if (g_acmd_probe_captures >= ACMD_PROBE_CAPTURE_MAX) return;
+    unsigned capture = ++g_acmd_probe_captures;
+    current->capture_index = capture;
+    char dir[MAX_PATH + 64], path[MAX_PATH + 96];
+    snprintf(dir, sizeof(dir), "%s\\div_%03u_task_%u_%s_%08X",
+             g_acmd_probe_dir, capture, g_acmd_probe_current_task,
+             acmd_probe_type_name(current->type), current->address);
+    CreateDirectoryA(dir, NULL);
+    snprintf(path, sizeof(path), "%s\\alist.bin", dir);
+    acmd_probe_write_logical_file(path, rdram + phys, alist_bytes);
+    snprintf(path, sizeof(path), "%s\\expected_after_previous.bin", dir);
+    acmd_probe_write_logical_file(path, tracked->raw, current->size);
+    snprintf(path, sizeof(path), "%s\\before_current.bin", dir);
+    acmd_probe_write_logical_file(path, rdram + current->address, current->size);
+    snprintf(path, sizeof(path), "%s\\metadata.txt", dir);
+    FILE* f = fopen(path, "wb");
+    if (f) {
+        fprintf(f, "task=%u\nprevious_task=%u\ntype=%s\naddress=%08X\nbytes=%u\n",
+                g_acmd_probe_current_task, tracked->last_task,
+                acmd_probe_type_name(current->type), current->address,
+                current->size);
+        fprintf(f, "previous_after_fnv=%016llX\nbefore_fnv=%016llX\n",
+                (unsigned long long)tracked->last_hash,
+                (unsigned long long)current->before_hash);
+        fclose(f);
+    }
+}
+
+static void acmd_probe_capture_baseline(uint8_t* rdram, uint32_t phys,
+                                        uint32_t alist_bytes) {
+    if (g_acmd_probe_baseline_captured || !g_acmd_probe_current_count) return;
+    g_acmd_probe_baseline_captured = 1;
+    g_acmd_probe_baseline_task = g_acmd_probe_current_task;
+    /* Na sequência alinhada mais recente, a primeira diferença é produzida
+     * pela décima AList depois da inicial: local 43 / Project64 58. Usar a
+     * distância relativa tolera o deslizamento do índice absoluto. */
+    g_acmd_probe_suspect_task = g_acmd_probe_baseline_task + 10u;
+    char dir[MAX_PATH + 64], path[MAX_PATH + 112];
+    snprintf(dir, sizeof(dir), "%s\\baseline_task_%u", g_acmd_probe_dir,
+             g_acmd_probe_current_task);
+    CreateDirectoryA(dir, NULL);
+    snprintf(path, sizeof(path), "%s\\alist.bin", dir);
+    acmd_probe_write_logical_file(path, rdram + phys, alist_bytes);
+    for (unsigned i = 0; i < g_acmd_probe_current_count; ++i) {
+        acmd_probe_current_t* current = &g_acmd_probe_current[i];
+        snprintf(path, sizeof(path), "%s\\before_%s_%08X.bin", dir,
+                 acmd_probe_type_name(current->type), current->address);
+        acmd_probe_write_logical_file(path, rdram + current->address,
+                                      current->size);
+    }
+    snprintf(path, sizeof(path), "%s\\metadata.txt", dir);
+    FILE* f = fopen(path, "wb");
+    if (f) {
+        fprintf(f, "task=%u\nalist_bytes=%u\nalist_fnv=%016llX\nstates=%u\n",
+                g_acmd_probe_current_task, alist_bytes,
+                (unsigned long long)g_acmd_probe_current_alist,
+                g_acmd_probe_current_count);
+        fclose(f);
+    }
+}
+
+static void acmd_probe_capture_suspect_before(uint8_t* rdram, uint32_t phys,
+                                               uint32_t alist_bytes) {
+    if (g_acmd_probe_suspect_captured || !g_acmd_probe_suspect_task ||
+        g_acmd_probe_current_task != g_acmd_probe_suspect_task) return;
+    g_acmd_probe_suspect_captured = 1;
+    char dir[MAX_PATH + 64], path[MAX_PATH + 112];
+    snprintf(dir, sizeof(dir), "%s\\suspect_task_%u", g_acmd_probe_dir,
+             g_acmd_probe_current_task);
+    CreateDirectoryA(dir, NULL);
+    snprintf(path, sizeof(path), "%s\\alist.bin", dir);
+    acmd_probe_write_logical_file(path, rdram + phys, alist_bytes);
+    /* O oráculo da tarefa 58 preserva cada LOADBUFF/LOADADPCM. A RDRAM
+     * integral permite extrair os mesmos intervalos localmente depois da
+     * execução, sem abrir dezenas de arquivos no instante crítico. */
+    snprintf(path, sizeof(path), "%s\\rdram_before.bin", dir);
+    acmd_probe_write_logical_file(path, rdram, 0x800000u);
+    for (unsigned i = 0; i < g_acmd_probe_current_count; ++i) {
+        acmd_probe_current_t* current = &g_acmd_probe_current[i];
+        snprintf(path, sizeof(path), "%s\\before_%s_%08X.bin", dir,
+                 acmd_probe_type_name(current->type), current->address);
+        acmd_probe_write_logical_file(path, rdram + current->address,
+                                      current->size);
+    }
+    snprintf(path, sizeof(path), "%s\\metadata.txt", dir);
+    FILE* f = fopen(path, "wb");
+    if (f) {
+        fprintf(f,
+                "baseline_task=%u\nsuspect_task=%u\nalist_bytes=%u\n"
+                "alist_fnv=%016llX\nstates=%u\n",
+                g_acmd_probe_baseline_task, g_acmd_probe_current_task,
+                alist_bytes, (unsigned long long)g_acmd_probe_current_alist,
+                g_acmd_probe_current_count);
+        fclose(f);
+    }
+}
+
+static void acmd_probe_before(uint8_t* rdram, uint32_t phys, uint32_t bytes,
+                              uint32_t task) {
+    acmd_probe_init();
+    if (!g_acmd_probe_enabled) return;
+    g_acmd_probe_current_count = 0;
+    g_acmd_probe_current_task = task;
+    g_acmd_probe_current_alist = acmd_fnv1a_logical(rdram + phys, bytes);
+    uint32_t segs[16] = {0};
+    for (uint32_t i = 0; i < bytes / 8u; ++i) {
+        uint32_t w0 = *(uint32_t*)(rdram + phys + i * 8u);
+        uint32_t w1 = *(uint32_t*)(rdram + phys + i * 8u + 4u);
+        uint32_t op = w0 >> 24;
+        if (op == 7u) {
+            segs[(w0 >> 16) & 15u] = w1 & 0x1FFFFFFFu;
+            continue;
+        }
+        uint8_t type = 0;
+        uint32_t size = 0;
+        if (op == 1u) { type = 1; size = 32u; }
+        else if (op == 5u) { type = 2; size = 10u; }
+        else if (op == 3u) { type = 3; size = 80u; }
+        if (!type || g_acmd_probe_current_count >= ACMD_PROBE_CURRENT_MAX) continue;
+        uint32_t segment = (w1 >> 24) & 0x3Fu;
+        uint32_t address = (((segment < 16u ? segs[segment] : 0u) +
+                             (w1 & 0xFFFFFFu)) & 0x1FFFFFFFu);
+        if (!address || address + size > 0x800000u ||
+            acmd_probe_current_seen(type, address)) continue;
+        acmd_probe_current_t* current =
+            &g_acmd_probe_current[g_acmd_probe_current_count++];
+        memset(current, 0, sizeof(*current));
+        current->type = type;
+        current->address = address;
+        current->size = size;
+        current->before_hash = acmd_fnv1a_logical(rdram + address, size);
+        acmd_probe_tracked_t* tracked = acmd_probe_find_tracked(type, address, size);
+        if (tracked && tracked->valid) {
+            current->had_previous = 1;
+            current->previous_task = tracked->last_task;
+            current->previous_hash = tracked->last_hash;
+            current->changed_between = current->before_hash != tracked->last_hash;
+            if (current->changed_between)
+                acmd_probe_capture_between(rdram, phys, bytes, current, tracked);
+        }
+    }
+    /* A primeira AList musical é a fronteira mais importante: nesta rodada os
+     * estados iniciais ainda eram idênticos aos do Project64, mas a lista já
+     * diferia. Uma única captura bruta permite localizar o primeiro comando
+     * divergente sem despejar milhares de tarefas. */
+    acmd_probe_capture_baseline(rdram, phys, bytes);
+    acmd_probe_capture_suspect_before(rdram, phys, bytes);
+}
+
+static void acmd_probe_after(uint8_t* rdram, uint32_t phys, uint32_t bytes,
+                             uint32_t task, int result) {
+    if (!g_acmd_probe_enabled || g_acmd_probe_current_task != task) return;
+    for (unsigned i = 0; i < g_acmd_probe_current_count; ++i) {
+        acmd_probe_current_t* current = &g_acmd_probe_current[i];
+        uint64_t after = acmd_fnv1a_logical(rdram + current->address,
+                                            current->size);
+        fprintf(g_acmd_probe_states,
+                "%u,%016llX,%d,%s,%08X,%u,%u,%016llX,%016llX,%016llX,%d,%d,%u\n",
+                task, (unsigned long long)g_acmd_probe_current_alist, result,
+                acmd_probe_type_name(current->type), current->address,
+                current->size, current->previous_task,
+                (unsigned long long)current->previous_hash,
+                (unsigned long long)current->before_hash,
+                (unsigned long long)after, current->changed_between,
+                after != current->before_hash, current->capture_index);
+        acmd_probe_tracked_t* tracked = acmd_probe_find_tracked(
+            current->type, current->address, current->size);
+        if (tracked) {
+            tracked->valid = 1;
+            tracked->last_task = task;
+            tracked->last_hash = after;
+            memcpy(tracked->raw, rdram + current->address, current->size);
+        }
+        if (current->capture_index) {
+            char dir[MAX_PATH + 64], path[MAX_PATH + 96];
+            snprintf(dir, sizeof(dir), "%s\\div_%03u_task_%u_%s_%08X",
+                     g_acmd_probe_dir, current->capture_index, task,
+                     acmd_probe_type_name(current->type), current->address);
+            snprintf(path, sizeof(path), "%s\\after_current.bin", dir);
+            acmd_probe_write_logical_file(path, rdram + current->address,
+                                          current->size);
+        }
+        if (task == g_acmd_probe_suspect_task && g_acmd_probe_suspect_captured) {
+            char dir[MAX_PATH + 64], path[MAX_PATH + 112];
+            snprintf(dir, sizeof(dir), "%s\\suspect_task_%u", g_acmd_probe_dir,
+                     task);
+            snprintf(path, sizeof(path), "%s\\after_%s_%08X.bin", dir,
+                     acmd_probe_type_name(current->type), current->address);
+            acmd_probe_write_logical_file(path, rdram + current->address,
+                                          current->size);
+        }
+    }
+
+    /* Uma AList salva tanto historicos internos (nesta ROM em uma regiao mais
+     * baixa) quanto o PCM final, geralmente em varios fragmentos proximos.
+     * Guardamos os SAVEBUFF e, depois, unimos somente o grupo de enderecos
+     * mais alto. Isso evita misturar estados 0x22xxxx com PCM 0x26xxxx. */
+    struct { uint32_t address, end; } saves[128];
+    unsigned save_count = 0;
+    uint32_t highest_save = 0, setbuff_bytes = 0;
+    for (uint32_t i = 0; i < bytes / 8u; ++i) {
+        uint32_t w0 = *(uint32_t*)(rdram + phys + i * 8u);
+        uint32_t w1 = *(uint32_t*)(rdram + phys + i * 8u + 4u);
+        if ((w0 >> 24) == 8u) setbuff_bytes = w1 & 0xFFFFu;
+        else if ((w0 >> 24) == 6u) {
+            uint32_t save_address = w1 & 0x1FFFFFFFu;
+            uint32_t save_end = save_address + setbuff_bytes;
+            if (setbuff_bytes && save_end >= save_address &&
+                save_end <= 0x800000u) {
+                if (save_count < sizeof(saves) / sizeof(saves[0])) {
+                    saves[save_count].address = save_address;
+                    saves[save_count].end = save_end;
+                    ++save_count;
+                }
+                if (save_address > highest_save) highest_save = save_address;
+            }
+        }
+    }
+    uint32_t pcm_address = UINT32_MAX, pcm_end = 0;
+    for (unsigned i = 0; i < save_count; ++i) {
+        /* O maior buffer AI observado tem poucos KiB. Uma janela de 64 KiB
+         * acomoda seus fragmentos e exclui com folga os estados da ABI. */
+        if (highest_save - saves[i].address <= 0x10000u) {
+            if (saves[i].address < pcm_address) pcm_address = saves[i].address;
+            if (saves[i].end > pcm_end) pcm_end = saves[i].end;
+        }
+    }
+    uint32_t pcm_bytes = pcm_address != UINT32_MAX && pcm_end > pcm_address
+                             ? pcm_end - pcm_address
+                             : 0;
+    if (pcm_address != UINT32_MAX && pcm_bytes &&
+        pcm_address + pcm_bytes <= 0x800000u) {
+        acmd_probe_pcm_t* pcm =
+            &g_acmd_probe_pcm_ring[g_acmd_probe_pcm_head++ % ACMD_PROBE_PCM_RING];
+        pcm->valid = 1;
+        pcm->consumed = 0;
+        pcm->task = task;
+        pcm->address = pcm_address;
+        pcm->bytes = pcm_bytes;
+        pcm->hash = acmd_fnv1a_logical(rdram + pcm_address, pcm_bytes);
+        fprintf(g_acmd_probe_pcm, "rsp,%u,%08X,%u,%016llX,%016llX,0\n",
+                task, pcm_address, pcm_bytes, (unsigned long long)pcm->hash,
+                (unsigned long long)pcm->hash);
+        if (task == g_acmd_probe_suspect_task && g_acmd_probe_suspect_captured) {
+            char dir[MAX_PATH + 64], path[MAX_PATH + 112];
+            snprintf(dir, sizeof(dir), "%s\\suspect_task_%u", g_acmd_probe_dir,
+                     task);
+            snprintf(path, sizeof(path), "%s\\pcm_after_%08X_%u.bin", dir,
+                     pcm_address, pcm_bytes);
+            acmd_probe_write_logical_file(path, rdram + pcm_address, pcm_bytes);
+        }
+    }
+    if ((++g_acmd_probe_rows & 15u) == 0u) {
+        fflush(g_acmd_probe_states);
+        fflush(g_acmd_probe_pcm);
+    }
+}
+
+void rsp_audio_probe_ai_buffer(uint8_t* rdram, uint32_t address, uint32_t bytes) {
+    acmd_probe_init();
+    if (!g_acmd_probe_enabled || !rdram || !address || !bytes ||
+        address + bytes > 0x800000u) return;
+    acmd_probe_pcm_t* match = NULL;
+    for (unsigned age = 0; age < ACMD_PROBE_PCM_RING; ++age) {
+        unsigned pos = (g_acmd_probe_pcm_head - 1u - age) % ACMD_PROBE_PCM_RING;
+        acmd_probe_pcm_t* candidate = &g_acmd_probe_pcm_ring[pos];
+        if (candidate->valid && !candidate->consumed &&
+            candidate->address == address && candidate->bytes == bytes) {
+            match = candidate;
+            break;
+        }
+    }
+    uint64_t observed = acmd_fnv1a_logical(rdram + address, bytes);
+    if (match) {
+        match->consumed = 1;
+        fprintf(g_acmd_probe_pcm, "ai,%u,%08X,%u,%016llX,%016llX,%d\n",
+                match->task, address, bytes, (unsigned long long)match->hash,
+                (unsigned long long)observed, observed != match->hash);
+    } else {
+        fprintf(g_acmd_probe_pcm, "ai,0,%08X,%u,0000000000000000,%016llX,1\n",
+                address, bytes, (unsigned long long)observed);
+    }
+}
+
+void rsp_audio_probe_flush(void) {
+    if (g_acmd_probe_states) fflush(g_acmd_probe_states);
+    if (g_acmd_probe_pcm) fflush(g_acmd_probe_pcm);
+}
+
 /* Assinatura de cada AList, com o instante em que ela foi executada.
  *
  * A comparacao com o oraculo mostrou uma janela degradada entre 12 s e 17 s que
@@ -3204,7 +3703,8 @@ static int acmd_native_rsp_mode(void) {
 /* Registro compacto, opt-in, da entrada entregue ao RSP nativo. Ele permite
  * alinhar a construcao da AList com a sonda do Project64 sem despejar PCM ou
  * alterar a cadencia. O contador inclui inclusive listas silenciosas. */
-static void acmd_trace_native_list(uint8_t* rdram, uint32_t phys, uint32_t bytes) {
+static void acmd_trace_native_list(uint8_t* rdram, uint32_t phys, uint32_t bytes,
+                                   int result) {
     static int initialized = 0;
     static uint32_t task_index = 0;
     static FILE* out = NULL;
@@ -3213,7 +3713,7 @@ static void acmd_trace_native_list(uint8_t* rdram, uint32_t phys, uint32_t bytes
         const char* path = getenv("WPJ2_NATIVE_AUDIO_LIST_TRACE");
         if (path && *path) out = fopen(path, "wb");
         if (out) {
-            fprintf(out, "task,bytes,op1_adpcm,op3_envmix,op5_resample,op8_setbuf,op9_setvol\n");
+            fprintf(out, "task,bytes,op1_adpcm,op3_envmix,op5_resample,op8_setbuf,op9_setvol,native_result\n");
             fflush(out);
         }
     }
@@ -3224,8 +3724,8 @@ static void acmd_trace_native_list(uint8_t* rdram, uint32_t phys, uint32_t bytes
         uint32_t op = *(uint32_t*)(rdram + phys + i * 8u) >> 24;
         if (op < 16u) count[op]++;
     }
-    fprintf(out, "%u,%u,%u,%u,%u,%u,%u\n", task_index, bytes,
-            count[1], count[3], count[5], count[8], count[9]);
+    fprintf(out, "%u,%u,%u,%u,%u,%u,%u,%d\n", task_index, bytes,
+            count[1], count[3], count[5], count[8], count[9], result);
     fflush(out);
 }
 
@@ -3613,7 +4113,11 @@ static void run_acmd_list(uint8_t* rdram, uint32_t phys, uint32_t bytes) {
      * regressao; a chave impede que uma integracao ainda em validacao mude o
      * executavel de demonstracao. */
     if (acmd_native_rsp_mode()) {
-        acmd_trace_native_list(rdram, phys, bytes);
+        /* Índice absoluto da tarefa nativa, incluindo as listas silenciosas.
+           O oráculo Project64 usa a mesma convenção; isso permite descobrir
+           a primeira voz cujo histórico diverge sem alinhar pelo relógio. */
+        static unsigned native_all_tasks;
+        const unsigned native_task_index = ++native_all_tasks;
         /* AList e estados antes do RSP, somente quando pedido. A segunda
            AList musical e comparavel diretamente com a captura Project64:
            ambas ja possuem os historicos produzidos pela primeira passagem. */
@@ -3655,6 +4159,18 @@ static void run_acmd_list(uint8_t* rdram, uint32_t phys, uint32_t bytes) {
             printf("[captura] AList nativa de audio armada por F5 salva (%s)\n", label);
             fflush(stdout);
         }
+        /* Hashes compactos dos estados persistentes antes de cada AList. */
+        if (has_envmix) {
+            acmd_probe_before(rdram, phys, bytes, native_task_index);
+            unsigned deep_limit = 430u;
+            const char* deep_count = getenv("WPJ2_NATIVE_AUDIO_DEEP_CAPTURE_COUNT");
+            if (deep_count && *deep_count) {
+                unsigned parsed = (unsigned)strtoul(deep_count, NULL, 10);
+                if (parsed > 0u && parsed <= 10000u) deep_limit = parsed;
+            }
+            if (native_task_index <= deep_limit)
+                acmd_deep_hash_trace(rdram, phys, bytes, native_task_index);
+        }
         /* A mesma selecao de ENVMIXER usada pelo HLE agora vale para o
            microcodigo real. Somente os comandos que injetam a voz nos buses
            sao anulados; ADPCM e RESAMPLE das demais continuam atualizando
@@ -3668,6 +4184,11 @@ static void run_acmd_list(uint8_t* rdram, uint32_t phys, uint32_t bytes) {
             }
         }
         int result = wpj2_native_audio_rsp(rdram, g_spmem);
+        if (has_envmix)
+            acmd_probe_after(rdram, phys, bytes, native_task_index, result);
+        /* O perfil audio_rsp_exato usa este resultado para demonstrar se
+         * cada AList saiu pelo microcodigo ou caiu no HLE aproximado. */
+        acmd_trace_native_list(rdram, phys, bytes, result);
         if (result == 0) return;
         if (g_rsp_debug) {
             printf("[audio-rsp] ucode nativo retornou %d; HLE C preservado\n", result);

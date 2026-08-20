@@ -3,7 +3,7 @@ import wave, struct, math, pathlib
 # Mede o piso de ruido do WAV entregue ao driver. Chiado aparece como energia
 # constante nos trechos que deveriam ser silencio, e como diferenca entre os
 # canais quando o conteudo e mono.
-p = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\lab\saida.wav")
+p = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\temp\projeto\audio_sonda\saida.wav")
 # O cabecalho declara 0 quadros: audio_shutdown() nao roda sob
 # TerminateProcess e nunca volta para corrigir o tamanho. Os dados estao
 # integros, entao lemos pelo tamanho do arquivo e ignoramos o campo.

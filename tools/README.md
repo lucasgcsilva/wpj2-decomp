@@ -42,22 +42,23 @@ distingue uma instrucao de cache (inofensiva no host) de uma escrita em EPC
 funcoes vizinhas nos simbolos: fundir um alvo de `jal` quebraria toda chamada
 direta a ele.
 
-`build_lib.cmd` compila `RecompiledFuncs/` em `build/wpj2_recompiled.lib`. Nao
+`build_lib.cmd` compila `src/RecompiledFuncs/` em `build/wpj2_recompiled.lib`. Nao
 linka nem executa nada, entao um erro ali e sempre do recompilador ou dos
 limites de funcao — nunca do runtime.
 
 `gen_table.py` gera `runtime/func_table.c` (vram → ponteiro de funcao) a partir
-de `RecompiledFuncs/funcs.h`.
+de `src/RecompiledFuncs/funcs.h`.
 
-`trace_inject.py` produz uma copia de `RecompiledFuncs/` com um hook no topo de
+`trace_inject.py` produz `src/RecompiledFuncsTraced/` a partir de
+`src/RecompiledFuncs/`, com um hook no topo de
 cada funcao. Chamadas diretas entre funcoes recompiladas nao passam pelo lookup
 do runtime, entao sem os hooks nao da para medir o que executou.
-`RecompiledFuncs/` nunca e modificado no lugar.
+`src/RecompiledFuncs/` nunca e modificado no lugar.
 
 `build_probe.cmd` encadeia os tres passos acima e linka `wpj2_probe.exe`.
 
 `callers.py` responde "quem chama quem" nos dois sentidos, a partir de
-`analysis/callgraph.txt`.
+`analise/projeto/codigo/callgraph.txt`.
 
 `sweep.py` roda varias sondagens ao mesmo tempo, uma por configuracao, e compara
 cobertura entre elas. Cada corrida leva 20 s de relogio; seis em sequencia

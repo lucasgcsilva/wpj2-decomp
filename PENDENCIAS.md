@@ -7,7 +7,7 @@
 - **Localização:** estado `8/1`, mosaico de 30 `TEXRECT` (grade 5×6), blocos
   de `64×32`, textura CI8.
 - **Referência:** Project64 não mostra as junções no vídeo de comparação.
-- **Oráculo disponível:** `oraculo/pj64-rdram/wpj2_8_1_texrect_oracle.txt`.
+- **Oráculo disponível:** `analise/oraculo/graficos/wpj2_8_1_texrect_oracle.txt`.
 - **Tentativas já feitas:** BILERP forçado, filtro final tipo VI, borda extra
   de `TEXRECT` em COPY e permuta CI8 por DXT `0x100`. Nenhuma alterou o
   resultado observável; filtros de apresentação permanecem desligados no
@@ -23,7 +23,7 @@
   renderizada, mas há serrilhado e diferenças no padrão circular sob o trono,
   nas faixas azul/branco e no gradiente de fundo.
 - **Estado:** `12/50`.
-- **Oráculo disponível:** `oraculo/pj64-rdram/wpj2_material_12_50_oracle.txt`.
+- **Oráculo disponível:** `analise/oraculo/graficos/wpj2_material_12_50_oracle.txt`.
   Ele confirma `LOADTLUT` em TMEM `0x800`, seguido por textura CI8 de `64×32`
   e o respectivo `LOADBLOCK`/tile do material.
 - **Tentativas rejeitadas:** intercalação DXT para RGBA16 e CI no corredor,
@@ -35,7 +35,7 @@
 # Corredor 3D — personagem central: entrada e persistência
 
 - **Impacto:** médio. Na primeira conversa em `12/50`, o personagem deveria subir de baixo para cima e permanecer visível quando a caixa de diálogo termina. No recompilado ele aparece estático/tarde e, em outro ponto, some junto com a caixa.
-- **Evidência:** `lab/tri_alpha.csv`, janela `gfx 1380..1540`, mostra que as 56–57 faixas de material da malha são submetidas em todos os lotes, mas a faixa projetada Y da parte central varia somente cerca de 7–8 pixels e se repete. O F5 em `gfx=1461` registra o trono sem o personagem completo.
+- **Evidência consolidada:** a sonda da janela `gfx 1380..1540` mostrou que as 56–57 faixas de material da malha são submetidas em todos os lotes, mas a faixa projetada Y da parte central varia somente cerca de 7–8 pixels e se repete. O F5 em `gfx=1461` registrou o trono sem o personagem completo.
 - **O que foi descartado:** desligar Z (`WPJ2_F3D_Z=0`) destrói a oclusão do trono e não recupera a animação; trocar para multiplicação convencional (`WPJ2_F3D_MATRIX_CONVENTIONAL=1`) deforma todo o corredor. A malha usa `SETCOMBINE FC1219FF/FFFFFE38` (TEXEL × SHADE), portanto não se deve aplicar o `PRIMITIVE alpha` da caixa como regra global ao personagem.
 - **Próxima revisão:** instrumentar a pilha F3DEX por `MTX/PUSH/POPMTX` e comparar suas matrizes locais com uma captura equivalente do Project64. A correção deve preservar a ordem de matriz e o Z atuais; não resolver por retenção artificial de framebuffer ou alpha específico do personagem.
 

@@ -14,7 +14,9 @@ cd /d "%PROJ%"
 set WPJ2_TIMEOUT=%1
 if "%WPJ2_TIMEOUT%"=="" set WPJ2_TIMEOUT=300
 set WPJ2_WINDOW=1
-set WPJ2_OUT=%PROJ%\lab\jogar_
+set "WPJ2_TEMP=%PROJ%\temp\projeto\jogar"
+if not exist "%WPJ2_TEMP%" mkdir "%WPJ2_TEMP%"
+set WPJ2_OUT=%WPJ2_TEMP%\jogar_
 
 REM Segundo argumento: "audio" liga a sintese completa. Sem ele, o padrao e
 REM pular ADPCM/RESAMPLE/ENVMIX (WPJ2_AUDIO_FAST=1).
@@ -54,20 +56,20 @@ echo.
 REM Grava tudo em arquivo alem da tela: o console e verboso e as linhas que
 REM interessam ([pif] MUDOU, quando uma tecla e apertada) rolam para fora
 REM antes de dar tempo de ler.
-"%PROJ%\wpj2_probe.exe" "%ROM%" > "%PROJ%\lab\jogar.log" 2>&1
+"%PROJ%\wpj2_probe.exe" "%ROM%" > "%WPJ2_TEMP%\jogar.log" 2>&1
 echo.
 echo  --- teclas que chegaram ao runtime ---
-findstr /C:"controle] botoes" "%PROJ%\lab\jogar.log" > "%PROJ%\lab\_teclas.txt"
-find /c /v "zzz" < "%PROJ%\lab\_teclas.txt"
+findstr /C:"controle] botoes" "%WPJ2_TEMP%\jogar.log" > "%WPJ2_TEMP%\_teclas.txt"
+find /c /v "zzz" < "%WPJ2_TEMP%\_teclas.txt"
 echo.
 echo  --- leituras de controle que o JOGO pediu ---
-findstr /C:"leitura=" "%PROJ%\lab\jogar.log" > "%PROJ%\lab\_leituras.txt"
-find /c /v "zzz" < "%PROJ%\lab\_leituras.txt"
+findstr /C:"leitura=" "%WPJ2_TEMP%\jogar.log" > "%WPJ2_TEMP%\_leituras.txt"
+find /c /v "zzz" < "%WPJ2_TEMP%\_leituras.txt"
 echo.
 echo  --- valores que o jogo recebeu ---
-findstr /C:"MUDOU" "%PROJ%\lab\jogar.log"
+findstr /C:"MUDOU" "%WPJ2_TEMP%\jogar.log"
 echo.
 echo  Se as teclas forem dezenas e as leituras forem 1, o jogo parou de
 echo  perguntar - o defeito e de escalonamento, nao de entrada.
 echo.
-echo  Log completo em lab\jogar.log
+echo  Log completo em temp\projeto\jogar\jogar.log

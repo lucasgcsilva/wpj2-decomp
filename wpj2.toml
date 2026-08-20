@@ -5,7 +5,7 @@
 entrypoint = 0x80000400
 symbols_file_path = "wpj2.syms.toml"
 rom_file_path = "E:/projetos/n64-roms/Wonder Project J2 - Koruro no Mori no Jozet (Japan) [T-En by Ryu v1.0].z64"
-output_func_path = "RecompiledFuncs"
+output_func_path = "src/RecompiledFuncs"
 uses_mips3_float_mode = false
 single_file_output = false
 functions_per_output_file = 100

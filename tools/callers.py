@@ -1,4 +1,4 @@
-"""Quem chama quem. Le analysis/callgraph.txt e responde nos dois sentidos.
+"""Quem chama quem. Le analise/projeto/codigo/callgraph.txt e responde nos dois sentidos.
 
 Uso: callers.py func_800D5060 [func_...]
 Mostra os chamadores diretos e, logo abaixo, o que a propria funcao chama.
@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 graph = {}
-path = Path(__file__).resolve().parent.parent / "analysis" / "callgraph.txt"
+path = Path(__file__).resolve().parent.parent / "analise" / "projeto" / "codigo" / "callgraph.txt"
 for line in path.read_text(encoding="utf-8").splitlines():
     if "->" not in line:
         continue

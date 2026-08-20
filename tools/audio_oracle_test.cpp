@@ -56,7 +56,7 @@ static int16_t read_be_s16(const uint8_t* p) {
 }
 
 int main(int argc, char** argv) {
-    const std::string root = argc >= 2 ? argv[1] : "oraculo/pj64-rdram/audio_f5_task471";
+    const std::string root = argc >= 2 ? argv[1] : "analise/oraculo/audio/validacoes/task471";
     const std::string sep = root.empty() || root.back() == '/' || root.back() == '\\' ? "" : "/";
     std::vector<uint8_t> logical_rdram, logical_task, expected;
     if (!read_file(root + sep + "rdram.bin", logical_rdram) || logical_rdram.size() != 0x800000) {

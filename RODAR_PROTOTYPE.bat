@@ -9,7 +9,9 @@ set "WPJ2_WINDOW=1"
 set "WPJ2_WINDOW_HOLD_LAST=0"
 set "WPJ2_RETRACE=60"
 set "WPJ2_FRAME_SAMPLES=1"
-set "WPJ2_OUT=lab\prototype_v0.2_"
+set "WPJ2_TEMP=%~dp0temp\projeto\prototype"
+if not exist "%WPJ2_TEMP%" mkdir "%WPJ2_TEMP%"
+set "WPJ2_OUT=%WPJ2_TEMP%\prototype_v0.2_"
 set "WPJ2_AUDIO_FAST=1"
 REM A abertura usa texturas CI8; nesta rota o carregamento linear da TMEM e o
 REM comportamento correto. A intercalação continua ligada no wpj2_visual 3D.
@@ -29,14 +31,14 @@ if not exist "%WPJ2_PROTO%" (
     exit /b 1
 )
 if "%WPJ2_DEBUG%"=="1" (
-    "%WPJ2_PROTO%" "E:\projetos\n64-roms\Wonder Project J2 - Koruro no Mori no Jozet (Japan) [T-En by Ryu v1.0].z64" %WPJ2_SECONDS% > "%~dp0lab\prototype_v0.2_.console.txt" 2>&1
+    "%WPJ2_PROTO%" "E:\projetos\n64-roms\Wonder Project J2 - Koruro no Mori no Jozet (Japan) [T-En by Ryu v1.0].z64" %WPJ2_SECONDS% > "%WPJ2_TEMP%\prototype_v0.2_.console.txt" 2>&1
 ) else (
     "%WPJ2_PROTO%" "E:\projetos\n64-roms\Wonder Project J2 - Koruro no Mori no Jozet (Japan) [T-En by Ryu v1.0].z64" %WPJ2_SECONDS%
 )
 set "WPJ2_EXIT=%errorlevel%"
 echo.
 if "%WPJ2_DEBUG%"=="1" (
-    echo Prototipo v0.2 encerrado apos %WPJ2_SECONDS% segundo(s). Log: lab\prototype_v0.2_.console.txt
+    echo Prototipo v0.2 encerrado apos %WPJ2_SECONDS% segundo(s). Log: temp\projeto\prototype\prototype_v0.2_.console.txt
 ) else (
     echo Prototipo v0.2 encerrado apos %WPJ2_SECONDS% segundo(s). Modo release: sem logs ou dumps.
 )

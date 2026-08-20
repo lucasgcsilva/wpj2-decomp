@@ -21,9 +21,9 @@ from pathlib import Path
 
 PROJ = Path(__file__).resolve().parent.parent
 EXE = PROJ / "wpj2_visual.exe"
-ORACULO = PROJ / "oraculo" / "pj64-rdram" / "wpj2_audio_oracle.wav"
+ORACULO = PROJ / "analise" / "oraculo" / "audio" / "referencia" / "wpj2_audio_oracle.wav"
 ROM = next(Path("E:/projetos/n64-roms").glob("Wonder Project J2*.z64"))
-SAIDA = PROJ / "comparacao"
+SAIDA = PROJ / "temp" / "projeto" / "comparar_audio"
 
 DUR = sys.argv[1] if len(sys.argv) > 1 else "25"
 
@@ -144,7 +144,7 @@ for nome, espera, desc in CONFIGS:
     w("## %s — %s" % (nome, desc))
     w("")
     if not wav:
-        w("Nenhum WAV foi produzido. Veja `comparacao/%s/corrida.log`." % nome)
+        w("Nenhum WAV foi produzido. Veja `temp/projeto/comparar_audio/%s/corrida.log`." % nome)
         w("")
         continue
     pontos, erro = curva(wav, orac, taxa_o)
@@ -183,5 +183,5 @@ w("")
 w("Se `sem_espera` cair muito e as outras nao, a causa do chiado era o descarte")
 w("de buffers. Se as tres cairem igual, era outra coisa e o descarte era sintoma.")
 
-(PROJ / "COMPARACAO_AUDIO.md").write_text("\n".join(L), encoding="utf-8")
-print("COMPARACAO_AUDIO.md escrito (%d linhas)." % len(L))
+(SAIDA / "COMPARACAO_AUDIO.md").write_text("\n".join(L), encoding="utf-8")
+print("temp/projeto/comparar_audio/COMPARACAO_AUDIO.md escrito (%d linhas)." % len(L))

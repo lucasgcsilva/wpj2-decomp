@@ -655,6 +655,7 @@ static int g_rsp_dp_pending = 0;
  * reproduzindo a cadencia historica das capturas de 3D. A emulacao normal
  * continua preemptando apenas quando um retrace/evento foi entregue. */
 static int g_preempt_every_poll = 0;
+static int g_events_idle_only = -1;
 static int g_high_res_timer = 0;
 /* O ucode recompilado nao materializa `mtc0 Compare`. Sem esta ponte o
  * temporizador de libultra recebia COUNTER em todo VI, independentemente do
@@ -1165,6 +1166,14 @@ void func_800C79B0(uint8_t* rdram, recomp_context* ctx) {
     }
 }
 
+/* __osAiDeviceBusy. A versao recompilada lia uma palavra MMIO passiva na
+ * imagem de memoria; devolver o FIFO do dispositivo virtual permite que a
+ * propria osAiSetNextBuffer da ROM aplique exatamente a regra do libreultra. */
+void func_800CF810(uint8_t* rdram, recomp_context* ctx) {
+    (void)rdram;
+    ctx->r2 = (audio_ai_status() & 0x80000000u) ? 1u : 0u;
+}
+
 /* O buffer ja foi produzido pela tarefa de audio da RSP; capturar aqui e o
  * equivalente host de o AI iniciar seu DMA, sem alterar as escritas MMIO que o
  * jogo ainda le para controlar a propria fila. */
@@ -1423,6 +1432,10 @@ void recomp_poll(void) {
     if (g_in_poll) return;              /* nao interrompemos a propria entrega */
 
     uint8_t* rdram = g_rdram;
+    /* Mensagens da janela não podem depender da chegada de um novo quadro.
+       Telas pretas, sondas de cadência e threads longas ainda precisam
+       processar WM_PAINT/WM_CLOSE para permanecer responsivas. */
+    video_pump_messages();
     /* No modo sem timeout, fechar a janela e o encerramento normal. Fazemos a
      * limpeza aqui, em ponto cooperativo, para o cabeçalho WAV ser finalizado
      * antes de terminar o processo. */
@@ -1513,6 +1526,21 @@ void recomp_poll(void) {
     if (rd32(rdram, ADDR_RUNNING_THREAD) == 0) return;
 
     g_in_poll = 1;
+    if (g_events_idle_only < 0) {
+        const char* e = getenv("WPJ2_EVENTS_IDLE_ONLY");
+        g_events_idle_only = e && *e && *e != '0';
+    }
+    /* Modo determinístico experimental: VI/AI/COUNTER só avançam quando o
+       scheduler realmente ficou sem thread pronta. Durante uma thread ativa,
+       apenas a conclusão imediata do RSP pode interrompê-la. Isso impede que
+       a velocidade de rasterização do host escolha em qual instrução do jogo
+       o VI cairá. */
+    if (g_events_idle_only) {
+        int rsp_woke = deliver_rsp_task_done(rdram);
+        if (rsp_woke) sched_preempt(rdram);
+        g_in_poll = 0;
+        return;
+    }
     /* Uma interrupcao de CPU so existe quando o periodo do retrace venceu e
      * um evento foi postado. Preemptar tambem nos polls que apenas dormiram
      * por 1 ms fragmentava a thread do jogo milhares de vezes entre dois

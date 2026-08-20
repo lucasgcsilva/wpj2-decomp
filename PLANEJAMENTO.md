@@ -26,7 +26,7 @@ e os ajustes específicos do jogo fazem parte do trabalho posterior.
 
 3. **Preparar o pipeline do projeto.** Adaptar somente a estrutura útil de
    `E:\projetos\superman-decomp`: scripts de inspeção, arquivo de ambiente,
-   diretórios ignorados (`build/`, `RecompiledFuncs/`) e logs reprodutíveis.
+   diretórios ignorados (`build/`, `src/RecompiledFuncs/`) e logs reprodutíveis.
    Nenhum endereço, símbolo ou configuração do Superman deve ser reutilizado
    como dado do Wonder Project J2.
 

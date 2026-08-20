@@ -79,7 +79,7 @@ listas.
   para investigar som.
 - **Replay do PJ64** (`Scripts\wpj2_audio_replay_oracle.js`): captura AList,
   estados de entrada e saídas. Já executado; dados em
-  `oraculo\pj64-rdram\audio_replay\`.
+  `analise\oraculo\audio\replay\`.
 
 ## Próximo passo
 

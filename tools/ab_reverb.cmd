@@ -23,8 +23,8 @@ for %%V in (base no_wet sem_polef seco) do (
     call :rodar %%V
 )
 echo.
-echo Pronto. Compare em lab\ab_*.wav
-dir "%PROJ%\lab\ab_*.wav"
+echo Pronto. Compare em temp\projeto\audio_ab\ab_*.wav
+dir "%PROJ%\temp\projeto\audio_ab\ab_*.wav"
 goto :eof
 
 :rodar
@@ -36,8 +36,9 @@ set WPJ2_AUDIO=1
 set WPJ2_AUDIO_PLAY=1
 set WPJ2_AUDIO_FAST=
 set WPJ2_TIMEOUT=%DUR%
-set WPJ2_AUDIO_WAV=%PROJ%\lab\ab_%1.wav
+if not exist "%PROJ%\temp\projeto\audio_ab" mkdir "%PROJ%\temp\projeto\audio_ab"
+set WPJ2_AUDIO_WAV=%PROJ%\temp\projeto\audio_ab\ab_%1.wav
 echo === variante %1 (%DUR% s) ===
-"%PROJ%\wpj2_probe.exe" "%ROM%" > "%PROJ%\lab\ab_%1.log" 2>&1
+"%PROJ%\wpj2_probe.exe" "%ROM%" > "%PROJ%\temp\projeto\audio_ab\ab_%1.log" 2>&1
 endlocal
 goto :eof

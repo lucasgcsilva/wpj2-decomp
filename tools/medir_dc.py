@@ -7,11 +7,8 @@ import struct, math, pathlib
 # descontinuidade periodica - o "pipoco" relatado. Medimos a media por
 # janela (o DC) e o salto entre janelas vizinhas.
 TAXA = 22047
-ARQS = [("Project64", r"E:\projetos\project-wonder-j2-decomp\oraculo\pj64-rdram\audio_deep\pj64_audio_oracle.wav"),
-        ("nosso",     r"E:\projetos\project-wonder-j2-decomp\lab\ab_base.wav"),
-        ("sem_polef", r"E:\projetos\project-wonder-j2-decomp\lab\ab_sem_polef.wav"),
-        ("no_wet",    r"E:\projetos\project-wonder-j2-decomp\lab\ab_no_wet.wav"),
-        ("corrigido", r"E:\projetos\project-wonder-j2-decomp\lab\ab_corrigido.wav")]
+ARQS = [("Project64", r"E:\projetos\project-wonder-j2-decomp\analise\oraculo\audio\deep\pj64_audio_oracle.wav"),
+        ("nosso",     r"E:\projetos\project-wonder-j2-decomp\temp\projeto\testar\audio_rsp_exato\audio_capture.wav")]
 
 def carregar(p):
     d = pathlib.Path(p).read_bytes()[44:]

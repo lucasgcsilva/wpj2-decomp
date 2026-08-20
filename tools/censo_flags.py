@@ -3,7 +3,7 @@ import re, collections, pathlib
 # Apura o censo [acmd-flags] gravado em toda a execucao (nao so nas primeiras
 # tarefas, como fazia o dump [acmd]). Interessa saber quais opcodes aparecem
 # de fato nas listas musicais e com que flags.
-LAB = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\lab")
+LAB = pathlib.Path(r"E:\projetos\project-wonder-j2-decomp\temp\projeto\laboratorio")
 RX = re.compile(r"\[acmd-flags\]\s+(\S+)\s+flags=0x([0-9A-Fa-f]{2}).*tarefa de audio (\d+)")
 
 combos = collections.defaultdict(lambda: [10**9, 0])

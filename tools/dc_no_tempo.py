@@ -12,9 +12,8 @@ import struct, pathlib
 # As duas causas exigem correcoes completamente diferentes, e ate agora nunca
 # foram separadas.
 TAXA = 22047
-ARQS = [("nosso  ", r"E:\projetos\project-wonder-j2-decomp\lab\ab_base.wav"),
-        ("no_wet ", r"E:\projetos\project-wonder-j2-decomp\lab\ab_no_wet.wav"),
-        ("PJ64   ", r"E:\projetos\project-wonder-j2-decomp\oraculo\pj64-rdram\audio_deep\pj64_audio_oracle.wav")]
+ARQS = [("nosso  ", r"E:\projetos\project-wonder-j2-decomp\temp\projeto\testar\audio_rsp_exato\audio_capture.wav"),
+        ("PJ64   ", r"E:\projetos\project-wonder-j2-decomp\analise\oraculo\audio\deep\pj64_audio_oracle.wav")]
 
 def canal_esq(p):
     d = pathlib.Path(p).read_bytes()[44:]

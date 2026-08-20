@@ -16,5 +16,6 @@ call "%PROJ%\tools\build_probe.cmd"
 if errorlevel 1 exit /b 1
 
 echo === executando a sondagem ===
-"%PROJ%\wpj2_probe.exe" > "%PROJ%\probe_run.log" 2>&1
-type "%PROJ%\probe_run.log"
+if not exist "%PROJ%\temp\projeto\rebuild" mkdir "%PROJ%\temp\projeto\rebuild"
+"%PROJ%\wpj2_probe.exe" > "%PROJ%\temp\projeto\rebuild\probe_run.log" 2>&1
+type "%PROJ%\temp\projeto\rebuild\probe_run.log"

@@ -2,7 +2,7 @@
 setlocal
 REM Sonda profunda e ilimitada. O plugin copia o PCM final da AI; o script JS
 REM registra todas as ALists e seus estados internos antes do RSP executa-las.
-set "ROOT=%~dp0oraculo\pj64-rdram\audio_deep"
+set "ROOT=%~dp0temp\oraculo\audio_deep"
 set "WPJ2_AUDIO_ORACLE_WAV=%ROOT%\pj64_audio_oracle.wav"
 set "WPJ2_AUDIO_ORACLE_DIR=%ROOT%\ai_plugin"
 REM A copia-oraculo do Project64 le esta chave somente nesta execucao. Assim
