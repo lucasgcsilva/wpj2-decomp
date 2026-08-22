@@ -19,6 +19,7 @@ runtime/func_table.c
 analysis/
 temp/projeto/
 temp/oraculo/
+temp/lm_local/
 temp/quarentena_*/
 
 # Estrutura nova: índices e conclusões podem ser versionados, mas referências
@@ -69,6 +70,8 @@ tools/N64ModernRuntime-source/
 tools/Project64-source/
 tools/python-deps/
 tools/josette/
+tools/libreultra/
+tools/sdk-tools/
 
 # ---------------------------------------------------------------------------
 # Artefatos de build e de sondagem / Build and probe artifacts
