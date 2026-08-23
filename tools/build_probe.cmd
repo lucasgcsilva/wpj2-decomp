@@ -27,7 +27,7 @@ if errorlevel 1 (echo FALHOU A COMPILACAO DOS FONTES RECOMPILADOS & exit /b 1)
 echo === compilando o runtime ===
 cl /nologo /c /O2 /std:c17 /EHa /MP /DRECOMP_TRACING /DRECOMP_POLLING %INC% ^
    "%PROJ%\runtime\runtime.c" "%PROJ%\runtime\sched.c" "%PROJ%\runtime\hle.c" ^
-   "%PROJ%\runtime\pif.c" "%PROJ%\runtime\rsp.c" "%PROJ%\runtime\video.c" "%PROJ%\runtime\audio.c" ^
+   "%PROJ%\runtime\pif.c" "%PROJ%\runtime\mempak.c" "%PROJ%\runtime\rsp.c" "%PROJ%\runtime\video.c" "%PROJ%\runtime\audio.c" ^
    "%PROJ%\runtime\legendas.c" ^
    "%PROJ%\runtime\func_table.c" ^
    /Fo"%PROJ%\build\objp\\"

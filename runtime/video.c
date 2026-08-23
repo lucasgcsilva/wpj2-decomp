@@ -108,10 +108,9 @@ static void video_filtrar_vi_2d(uint32_t height) {
             if (v[k] < lo) lo = v[k];
             if (v[k] > hi) hi = v[k];
         }
-        /* As emendas da grade 64x32 sao apenas alguns niveis mais escuras que
-         * o bloco vizinho. O limiar 32 protegia texto, mas tambem as deixava
-         * intactas; 4 atua nessas variacoes sem alterar areas uniformes. */
-        if (hi - lo >= 4u) g_pixels_filtrados[i] = video_filtro_5(c, n, s, e, w);
+        /* Filtro anti-aliasing VI: suaviza bordas serrilhadas (poligonos e sprites)
+         * em variacoes de luma >= 2 sem esborrar areas de cor uniforme. */
+        if (hi - lo >= 2u) g_pixels_filtrados[i] = video_filtro_5(c, n, s, e, w);
     }
     memcpy(g_pixels, g_pixels_filtrados, sizeof(g_pixels));
 }
@@ -385,17 +384,19 @@ static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
      * quando a tecla e solta. */
     if (msg == WM_KEYDOWN || msg == WM_KEYUP) {
         uint16_t bit = 0;
+        static int state_up = 0, state_down = 0, state_left = 0, state_right = 0;
+
         switch (wp) {
-            case VK_RETURN: bit = 0x1000; break;   /* START */
+            case VK_RETURN: bit = 0x1000; break;            /* START */
             case 'X': case VK_SPACE: bit = 0x8000; break;   /* A */
-            case 'Z': bit = 0x4000; break;         /* B */
-            case 'C': bit = 0x2000; break;         /* Z (gatilho) */
-            case 'A': bit = 0x0020; break;         /* L */
-            case 'S': bit = 0x0010; break;         /* R */
-            case VK_UP:    bit = 0x0800; break;
-            case VK_DOWN:  bit = 0x0400; break;
-            case VK_LEFT:  bit = 0x0200; break;
-            case VK_RIGHT: bit = 0x0100; break;
+            case 'Z': bit = 0x4000; break;                  /* B */
+            case 'C': bit = 0x2000; break;                  /* Z */
+            case 'Q': bit = 0x0020; break;                  /* L */
+            case 'E': bit = 0x0010; break;                  /* R */
+            case VK_UP:    case 'W': bit = 0x0800; state_up = (msg == WM_KEYDOWN); break;
+            case VK_DOWN:  case 'S': bit = 0x0400; state_down = (msg == WM_KEYDOWN); break;
+            case VK_LEFT:  case 'A': bit = 0x0200; state_left = (msg == WM_KEYDOWN); break;
+            case VK_RIGHT: case 'D': bit = 0x0100; state_right = (msg == WM_KEYDOWN); break;
             default: break;
         }
         if (bit) {
@@ -403,9 +404,17 @@ static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             uint16_t antes = pressionados;
             if (msg == WM_KEYDOWN) pressionados |= bit;
             else                   pressionados &= (uint16_t)~bit;
+
+            pif_update_stick_from_keys(state_up, state_down, state_left, state_right);
+
             if (pressionados != antes) {
                 pif_set_buttons(pressionados);
-                printf("[controle] botoes=0x%04X\n", pressionados);
+                printf("[controle] botoes=0x%04X (analogico %s%s%s%s)\n",
+                       pressionados,
+                       state_up ? "CIMA " : "",
+                       state_down ? "BAIXO " : "",
+                       state_left ? "ESQ " : "",
+                       state_right ? "DIR " : "");
                 fflush(stdout);
             }
             return 0;

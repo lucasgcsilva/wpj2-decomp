@@ -25,6 +25,7 @@
 
 #include "runtime.h"
 #include "funcs.h"
+#include "mempak.h"
 
 #define PIF_SIZE 64
 
@@ -240,6 +241,16 @@ static void copy_bswap(uint8_t* dst, const uint8_t* src, size_t bytes) {
 #define CH_CONNECTED    0      /* so o canal 0 tem alguma coisa ligada */
 #define NO_DEVICE       0x80   /* bit posto no tamanho de resposta */
 
+void pif_update_stick_from_keys(int up, int down, int left, int right) {
+    int8_t sx = 0, sy = 0;
+    if (up)    sy += 80;
+    if (down)  sy -= 80;
+    if (right) sx += 80;
+    if (left)  sx -= 80;
+    g_stick_x = sx;
+    g_stick_y = sy;
+}
+
 /* Percorre a fita de comandos e preenche as respostas no lugar. */
 static void pif_process(void) {
     int i = 0, channel = 0;
@@ -268,11 +279,7 @@ static void pif_process(void) {
             if (rx >= 3) {
                 out[0] = 0x05;   /* tipo: controle padrao */
                 out[1] = 0x00;
-                /* 0x02 e CONT_CARD_PULL (remocao recente), nao "sem pak".
-                 * Reporta zero para um controle conectado e sem acessorio;
-                 * assim a libultra nao reinicia a deteccao de PFS a cada
-                 * consulta de estado. */
-                out[2] = 0x00;
+                out[2] = mempak_is_present() ? 0x01 : 0x00; /* 0x01 = CONT_CARD_ON (MemPak inserido!) */
             }
         } else if (cmd == CMD_READ_BTN) {
             if (rx >= 4) {
@@ -302,9 +309,23 @@ static void pif_process(void) {
                 out[2] = (uint8_t)g_stick_x;
                 out[3] = (uint8_t)g_stick_y;
             }
+        } else if (cmd == 0x02) { /* READ_PAK: Leitura de 32 bytes do MemPak */
+            if (tx >= 3 && rx >= 33) {
+                uint16_t addr = (uint16_t)((g_pif[i + 3] << 8) | g_pif[i + 4]);
+                uint8_t crc = 0;
+                mempak_read_block(addr, out, &crc);
+                out[32] = crc;
+            }
+        } else if (cmd == 0x03) { /* WRITE_PAK: Escrita de 32 bytes no MemPak */
+            if (tx >= 35 && rx >= 1) {
+                uint16_t addr = (uint16_t)((g_pif[i + 3] << 8) | g_pif[i + 4]);
+                uint8_t in_crc = g_pif[i + 5 + 32];
+                uint8_t out_crc = 0;
+                mempak_write_block(addr, &g_pif[i + 5], in_crc, &out_crc);
+                out[0] = out_crc;
+            }
         } else {
-            /* Pak de memoria e o resto: respondido como ausente, em vez de
-               devolver bytes inventados que o jogo trataria como validos. */
+            /* Outros acessorios nao suportados */
             g_pif[i + 1] |= NO_DEVICE;
         }
 

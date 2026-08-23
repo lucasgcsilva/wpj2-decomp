@@ -72,6 +72,9 @@ REM diagnosticos que o selecionam explicitamente abaixo.
 set "WPJ2_NATIVE_AUDIO_RSP=1"
 set "WPJ2_AI_VIRTUAL_CADENCE=1"
 set "WPJ2_AI_TIMED=0"
+REM O corredor atravessa o plano da camera. O F3DEX recorta as faces; descartar
+REM o triangulo inteiro faz paredes sumirem por um quadro e voltarem no outro.
+set "WPJ2_F3D_W_CLIP=1"
 set "WPJ2_BISSECAO="
 set "WPJ2_BUTTONS="
 set "WPJ2_WINDOW_TITLE=Wonder Project J2 - %PERFIL%"

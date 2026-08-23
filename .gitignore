@@ -98,6 +98,20 @@ RELATORIO_ULTIMA_SONDA.md
 wpj2_tmp.toml
 
 # ---------------------------------------------------------------------------
+# Rascunho
+# ---------------------------------------------------------------------------
+# ESTRUTURA.md define temp/ como area de trabalho descartavel: toda sonda nova
+# escreve ali primeiro. Nada dentro dela e fonte.
+temp/
+
+# ---------------------------------------------------------------------------
+# Saves do Controller Pack
+# ---------------------------------------------------------------------------
+# Conteudo do jogador, gerado em tempo de execucao pelo runtime/mempak.c. Nao
+# faz parte do fonte e nao e necessario para compilar.
+sav/
+
+# ---------------------------------------------------------------------------
 # Ambiente
 # ---------------------------------------------------------------------------
 __pycache__/

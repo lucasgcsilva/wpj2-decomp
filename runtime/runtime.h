@@ -202,5 +202,6 @@ void     pif_set_buttons(uint16_t b);
 void     pif_set_script(const char* s);
 void     pif_set_poll_script(const char* s);
 void     pif_set_stick(const char* value);
+void     pif_update_stick_from_keys(int up, int down, int left, int right);
 
 #endif

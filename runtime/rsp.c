@@ -1932,8 +1932,8 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
             int fog = ff <= 0.0f ? 0 : ff >= 1.0f ? 255 : (int)(ff * 255.0f + 0.5f);
             if (fog) {
                 uint16_t fr = (uint16_t)((g_fog_color >> 27) & 31u);
-                uint16_t fg = (uint16_t)((g_fog_color >> 22) & 31u);
-                uint16_t fb = (uint16_t)((g_fog_color >> 17) & 31u);
+                uint16_t fg = (uint16_t)((g_fog_color >> 19) & 31u);
+                uint16_t fb = (uint16_t)((g_fog_color >> 11) & 31u);
                 r5 = (uint16_t)((r5 * (255 - fog) + fr * fog + 127) / 255);
                 g5 = (uint16_t)((g5 * (255 - fog) + fg * fog + 127) / 255);
                 b5 = (uint16_t)((b5 * (255 - fog) + fb * fog + 127) / 255);
@@ -2118,25 +2118,8 @@ static void pintar_texrect(uint8_t* rdram, uint32_t tile,
      * 64x32 (ultima faixa 64x16). O vídeo do Project64 mostra-a opaca até
      * trocar para preto, apesar de o contador PRIMITIVE variar: esses lotes
      * são hand-off entre buffers, não um fade visível. */
-    int mosaico_transicao = T->fmt == 0u && T->siz == 2u &&
-        (g_prim_color & 0xFFu) < 255u && g_othermode_l == 0x00504A54u &&
-        g_combine_w0 == 0xFCFF97FFu && g_combine_w1 == 0xFF2CFE7Fu &&
-        x1 - x0 == 64u && (y1 - y0 == 32u || (y1 == 240u && y1 - y0 == 16u));
-    if (mosaico_transicao) {
-        uint32_t alpha_transicao = g_prim_color & 0xFFu;
-        if (!alpha_transicao) {
-            if (!g_transicao_preto_ate) {
-                /* O vídeo de referência registra aproximadamente 0,15 s de
-                 * preto (nove retraces NTSC) entre a cidade e o corredor. */
-                g_transicao_preto_ate = hle_retraces() + 9u;
-                limpar_alvo_entrada_3d(rdram);
-            }
-            g_transicao_apresentacao = 2;
-            return;
-        }
-        g_transicao_mosaico_2d = 1;
-        g_transicao_apresentacao = 1;
-    }
+    int mosaico_transicao = 0;
+    (void)mosaico_transicao;
     if ((g_prim_color & 0xFFu) < 255u && g_othermode_l) {
         g_alpha_texrects++;
         g_alpha_rect_x0 = x0; g_alpha_rect_y0 = y0;
@@ -2257,6 +2240,9 @@ static void pintar_texrect(uint8_t* rdram, uint32_t tile,
 /* Executa o que da para executar de uma lista de exibicao. */
 static void desenhar_dl(uint8_t* rdram, uint32_t phys, int nivel) {
     if (nivel > 8) return;
+    if (nivel == 0) {
+        g_scis_x0 = 0; g_scis_y0 = 0; g_scis_x1 = 320; g_scis_y1 = 240;
+    }
     for (uint32_t i = 0; i < 4096; i++) {
         uint32_t off = phys + i * 8;
         if (off + 8 > 0x800000u) return;
@@ -2443,18 +2429,18 @@ static void desenhar_dl(uint8_t* rdram, uint32_t phys, int nivel) {
             }
             case 0xE4: {                                   /* TEXRECT */
                 /* Os dois comandos seguintes sao RDPHALF_1 e RDPHALF_2, e
-                   carregam as coordenadas de textura. Sem le-los o retangulo
-                   sai no lugar certo com a textura errada. */
-                uint32_t h1 = 0, h2 = 0;
+                   carregam as coordenadas de textura com s0, t0, dsdx e dtdy. */
+                int16_t s0 = 0, t0 = 0, dsdx = 1024, dtdy = 1024;
                 if (off + 24 <= 0x800000u) {
-                    h1 = *(uint32_t*)(rdram + off + 12);
-                    h2 = *(uint32_t*)(rdram + off + 20);
+                    s0   = (int16_t)ram16(rdram, off + 12);
+                    t0   = (int16_t)ram16(rdram, off + 14);
+                    dsdx = (int16_t)ram16(rdram, off + 20);
+                    dtdy = (int16_t)ram16(rdram, off + 22);
                 }
                 pintar_texrect(rdram, (w1 >> 24) & 7,
                     ((w1 >> 12) & 0xFFF) >> 2, ( w1        & 0xFFF) >> 2,
                     (((w0 >> 12) & 0xFFF) >> 2), (( w0     & 0xFFF) >> 2),
-                    (int16_t)(h1 >> 16), (int16_t)h1,
-                    (int16_t)(h2 >> 16), (int16_t)h2);
+                    s0, t0, dsdx, dtdy);
                 i += 2;                                    /* consome os halves */
                 break;
             }
