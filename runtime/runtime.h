@@ -195,6 +195,9 @@ uint64_t pif_commands(void);
 uint64_t pif_controller_polls(void);
 int      pif_si_done_pending(void);
 void     pif_take_si_done(void);
+/* Sai a cada segundo pelo relogio, nao por leitura: continua reportando mesmo
+   depois que o jogo para de perguntar pelo controle. */
+void     pif_relatorio_periodico(void);
 void     pif_set_buttons(uint16_t b);
 void     pif_set_script(const char* s);
 void     pif_set_poll_script(const char* s);

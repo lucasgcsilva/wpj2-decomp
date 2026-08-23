@@ -190,6 +190,36 @@ uint64_t pif_controller_polls(void) { return g_polls_controle; }
 int pif_si_done_pending(void) { return g_si_done != 0; }
 void pif_take_si_done(void) { if (g_si_done) g_si_done--; }
 
+/* Relatorio periodico, disparado pelo relogio e nao por uma leitura.
+ *
+ * Motivo: o log por leitura emudeceu aos 2,3 s e nao havia como separar duas
+ * causas muito diferentes - "o jogo parou de perguntar pelo controle" e "o
+ * roteiro nunca chegou a produzir um botao". Um relatorio preso a leitura
+ * nunca responde isso, porque some junto com o sintoma que se quer medir.
+ *
+ * Este sai a cada segundo enquanto o processo viver e imprime lado a lado: o
+ * total de leituras (para achar o instante exato em que estagna), os dois
+ * contadores de SI, as conclusoes ainda nao entregues - se este numero cresce
+ * sem parar, post_event esta falhando e a thread do controle ficou bloqueada
+ * esperando uma mensagem que nunca chega - e o valor que o roteiro entregaria
+ * AGORA, independente de existir alguem para le-lo. */
+void pif_relatorio_periodico(void) {
+    static DWORD base = 0, proximo = 0;
+    DWORD agora = GetTickCount();
+    if (base == 0) { base = agora; proximo = agora; }
+    if ((long)(agora - proximo) < 0) return;
+    proximo = agora + 1000;
+    printf("[pif-per] t=%lu ms leituras=%llu si_w=%llu si_r=%llu pendentes=%u "
+           "roteiro=%04X ao_vivo=%04X\n",
+           (unsigned long)(agora - base),
+           (unsigned long long)g_polls_controle,
+           (unsigned long long)g_si_writes,
+           (unsigned long long)g_si_reads,
+           (unsigned)g_si_done,
+           (unsigned)botoes_agora(), (unsigned)g_buttons);
+    fflush(stdout);
+}
+
 /* A RDRAM guarda cada palavra de 32 bits na ordem de bytes do host; o bloco do
    PIF e uma sequencia de bytes. Trocar de quatro em quatro converte entre as
    duas visoes, e a operacao e a sua propria inversa. */
@@ -316,7 +346,30 @@ void func_800CD4F0(uint8_t* rdram, recomp_context* ctx) {
         pif_process();
         g_si_writes++;
     } else {
-        /* PIF -> RDRAM: devolve a fita ja com as respostas. */
+        /* PIF -> RDRAM: devolve a fita ja com as respostas.
+         *
+         * Reexecutar a fita AQUI nao e redundancia - e o comportamento do
+         * hardware, e sem isto o controle congela. A libultra escreve a fita
+         * uma unica vez; veja tools/libreultra/src/io/contreaddata.c:
+         *
+         *     if (__osContLastCmd != CONT_CMD_READ_BUTTON) {
+         *         __osPackReadData();
+         *         __osSiRawStartDma(OS_WRITE, &__osContPifRam);   // 1a vez so
+         *         osRecvMesg(mq, NULL, OS_MESG_BLOCK);
+         *     }
+         *     __osSiRawStartDma(OS_READ, &__osContPifRam);        // toda vez
+         *     __osContLastCmd = CONT_CMD_READ_BUTTON;
+         *
+         * A PIF RAM real retem a fita e o PIF a reexecuta a cada leitura, de
+         * modo que o OS_READ sozinho ja traz botoes novos. Processando so em
+         * dir=1, nos devolviamos para sempre o retrato tirado na ultima
+         * escrita. Medido antes da correcao, com relatorio de um em um
+         * segundo: si_w parou em 29 aos 2,0 s e nunca mais subiu, enquanto
+         * si_r seguiu em ~30/s ate 1176 aos 40 s - o jogo lia 30 vezes por
+         * segundo uma resposta de dois segundos atras. Era por isso que
+         * segurar START desde o boot "funcionava" (caia dentro da janela das
+         * 10 leituras iniciais) e apertar no titulo nunca funcionava. */
+        pif_process();
         copy_bswap(rdram + dram, g_pif, PIF_SIZE);
         g_si_reads++;
         /* Onde os botoes entram na memoria do jogo.

@@ -7,6 +7,8 @@ Resultados produzidos pelo runtime deste projeto e já interpretados.
   existente no protótipo histórico.
 - `audio_primeira_divergencia.md`: resultado consolidado da sonda de
   continuidade dos estados e do PCM entre RSP e AI.
+- `audio_dma_pi_endian.md`: causa e correção da troca de bytes nas amostras
+  ADPCM transferidas pelo PI para o cache de áudio.
 - `integracao_legendas.md`: rota real do diálogo inglês descompactado e estado
   da substituição PT-BR.
 - `referencia_wonder_llonsit.md`: avaliação da decompilação pública da ROM

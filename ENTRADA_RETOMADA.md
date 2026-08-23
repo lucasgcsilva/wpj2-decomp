@@ -1,6 +1,64 @@
 # Entrada de controle — estado da investigação
 
-> ## ✅ 22/08 — A CADEIA DE ENTRADA ESTÁ CORRETA
+> # ✅ 23/08 — RESOLVIDO: O PIF SÓ EXECUTAVA A FITA NA ESCRITA
+>
+> **Causa raiz.** `osContStartReadData` monta e escreve a fita de comandos
+> **uma única vez**. Depois disso ela só faz a leitura de volta
+> (`tools/libreultra/src/io/contreaddata.c`):
+>
+> ```c
+> if (__osContLastCmd != CONT_CMD_READ_BUTTON) {
+>     __osPackReadData();
+>     __osSiRawStartDma(OS_WRITE, &__osContPifRam);   // 1a vez só
+>     osRecvMesg(mq, NULL, OS_MESG_BLOCK);
+> }
+> __osSiRawStartDma(OS_READ, &__osContPifRam);        // toda vez
+> __osContLastCmd = CONT_CMD_READ_BUTTON;
+> ```
+>
+> No hardware a PIF RAM **retém** a fita e o PIF a **reexecuta a cada
+> leitura**, então o `OS_READ` sozinho já traz botões novos. O nosso
+> `func_800CD4F0` chamava `pif_process()` só em `dir=1`, e portanto devolvia
+> para sempre o retrato tirado na última escrita.
+>
+> **Medição que isolou o defeito** (relatório periódico `[pif-per]`, de um em
+> um segundo, disparado pelo relógio e não por leitura):
+>
+> ```
+> antes:  t=2000  leituras=10    si_w=29  si_r=35
+>         t=40000 leituras=10    si_w=29  si_r=1176   <- si_w congelado
+> depois: t=2000  leituras=25    si_w=29  si_r=35
+>         t=40000 leituras=1114  si_w=59  si_r=1134
+> ```
+>
+> O jogo lia 30 vezes por segundo uma resposta de dois segundos atrás.
+>
+> **Correção:** `pif_process()` também em `dir=0`, antes do `copy_bswap` de
+> volta (`runtime/pif.c`). É idempotente: `rx` é remascarado com `& 0x3F`, e o
+> bit `NO_DEVICE` posto em canais ausentes não se acumula.
+>
+> **Resultado, perfil `input_tardio` (START aos 21 s):**
+>
+> ```
+> [ctrl-raw] #612..#638  pad=1000  raw+0x04=10000000  estado=8/26
+> estado final: 11/24    (sem entrada o jogo termina em 12/50)
+> ```
+>
+> Isto também explica por que `WPJ2_BUTTONS` segurado desde o boot "funcionava"
+> e apertar no título nunca funcionava: só a janela das ~10 leituras iniciais
+> era real.
+>
+> **Armadilha de método.** Todo log de entrada até aqui era disparado *por
+> leitura*. Um relatório assim desaparece junto com o sintoma — o silêncio a
+> partir de 2,3 s foi lido durante ciclos como "o roteiro não produz botão",
+> quando era "ninguém está mais perguntando". Sonda de estagnação tem que ter
+> relógio próprio.
+
+> ## ✅ 22/08 — A CADEIA DE ENTRADA ESTÁ CORRETA (confirmado; era só metade)
+>
+> Tudo abaixo continua verdadeiro, mas media apenas os primeiros 2,3 s — que é
+> exatamente a janela em que a fita ainda era reescrita. Daí a conclusão de que
+> "o transporte não está quebrado": estava, só que fora da janela medida.
 >
 > Verificado de ponta a ponta com os símbolos da decompilação de referência
 > (`tools/wonder-source`), cujos endereços conferem com os nossos:

@@ -22,6 +22,8 @@
 static uint64_t g_pi_transfers = 0;
 static uint64_t g_pi_bytes = 0;
 static uint64_t g_pi_rejected = 0;
+static uint64_t g_pi_logical_realign = 0;
+static uint64_t g_pi_logical_realign_bytes = 0;
 
 /* O carregador devolve a fonte em v0 e entrega a copia alocada pelo quinto
  * argumento. A traducao precisa atingir essa copia: e ela que o formatador do
@@ -426,6 +428,35 @@ static void copy_cart_logical(uint8_t* rdram, uint32_t target, uint32_t source,
         rdram[(target + i) ^ 3u] = cart[(source + i) ^ 3u];
 }
 
+/* A janela da ROM e a RDRAM usam o mesmo armazenamento word-swapped, mas um
+ * memcpy entre elas so preserva os bytes MIPS quando origem e destino possuem
+ * o mesmo alinhamento modulo 4. Isso nao e garantido pelo PI: o callback DMA
+ * de audio do jogo (func_800B9068) alinha a amostra apenas em 2 bytes e a
+ * copia para um cache alinhado em RDRAM. Nos blocos ROM == 2 (mod 4), o memcpy
+ * antigo trocava os pares de bytes do ADPCM e produzia o chiado intermitente.
+ *
+ * Mantemos o caminho rapido quando os alinhamentos coincidem e fazemos a
+ * conversao logica somente nos casos que realmente precisam dela. */
+static void copy_pi_logical(uint8_t* rdram, uint32_t dram, uint32_t cart_off,
+                            uint32_t size, int32_t dir) {
+    uint8_t* cart = rdram + CART_WINDOW_OFFSET;
+    if (((dram ^ cart_off) & 3u) == 0) {
+        if (dir == 0) memcpy(rdram + dram, cart + cart_off, size);
+        else          memcpy(cart + cart_off, rdram + dram, size);
+        return;
+    }
+
+    g_pi_logical_realign++;
+    g_pi_logical_realign_bytes += size;
+    if (dir == 0) {
+        for (uint32_t i = 0; i < size; i++)
+            rdram[(dram + i) ^ 3u] = cart[(cart_off + i) ^ 3u];
+    } else {
+        for (uint32_t i = 0; i < size; i++)
+            cart[(cart_off + i) ^ 3u] = rdram[(dram + i) ^ 3u];
+    }
+}
+
 void func_800BD218(uint8_t* rdram, recomp_context* ctx) {
     uint32_t source = (uint32_t)ctx->r4;
     uint32_t target = (uint32_t)ctx->r5;
@@ -449,6 +480,9 @@ void func_800BD218(uint8_t* rdram, recomp_context* ctx) {
 }
 
 void hle_dma_report(void) {
+    printf("PI com realinhamento logico: %llu transferencia(s), %llu bytes\n",
+           (unsigned long long)g_pi_logical_realign,
+           (unsigned long long)g_pi_logical_realign_bytes);
     printf("leituras do cartucho por bloco (%d distintos%s):\n", g_dma_hist_n,
            g_dma_fora_hist ? ", tabela cheia" : "");
     /* Ordena na hora, por repeticao: sao poucos e so imprime uma vez. */
@@ -499,11 +533,8 @@ void func_800CB090(uint8_t* rdram, recomp_context* ctx) {
     uint32_t phys_dram = dram & 0x1FFFFFFFu;
     uint32_t phys_dev  = (0xB0000000u | dev) & 0x1FFFFFFFu;
 
-    uint8_t* ram  = rdram + phys_dram;
-    uint8_t* cart = rdram + CART_WINDOW_OFFSET + (phys_dev - 0x10000000u);
-
-    if (dir == 0) memcpy(ram, cart, size);
-    else          memcpy(cart, ram, size);
+    uint32_t cart_off = phys_dev - 0x10000000u;
+    copy_pi_logical(rdram, phys_dram, cart_off, size, dir);
 
     g_pi_transfers++;
     g_pi_bytes += size;
@@ -555,10 +586,9 @@ void func_800D5060(uint8_t* rdram, recomp_context* ctx) {
         return;
     }
 
-    uint8_t* ram  = rdram + (dram & 0x1FFFFFFFu);
-    uint8_t* cart = rdram + CART_WINDOW_OFFSET + (phys_dev - 0x10000000u);
-    if (dir == 0) memcpy(ram, cart, size);
-    else          memcpy(cart, ram, size);
+    uint32_t phys_dram = dram & 0x1FFFFFFFu;
+    uint32_t cart_off = phys_dev - 0x10000000u;
+    copy_pi_logical(rdram, phys_dram, cart_off, size, dir);
 
     g_pi_transfers++;
     g_pi_bytes += size;
@@ -1075,19 +1105,35 @@ void func_80098D24(uint8_t* rdram, recomp_context* ctx) {
      * "chamada sempre com zero". As primeiras cinco mais uma a cada 300
      * separam os dois casos e ainda mostram a frequencia. */
     n++;
-    if (n <= 5u || (n % 300u) == 0u) {
+    /* Alem da amostragem periodica, registra SEMPRE que houver botao. Um
+     * toque curto (200 ms) cabe inteiro entre duas amostras de 300 chamadas e
+     * passava despercebido, dando a impressao de que a entrada nao chegou.
+     * O teto evita inundar o log quando o botao fica preso. */
+    static unsigned com_botao;
+    int interessante = (pad_depois != 0 || pad_antes != 0) && com_botao < 30u;
+    if (interessante) com_botao++;
+    if (n <= 5u || (n % 300u) == 0u || interessante) {
         /* O portao em 0x80098D84 (`lbu 0x255C($t0)`, passo 6) e
          * gContPad[i].errno: se nao for zero o jogo pula o controle inteiro.
          * MEDIDO: errno=00, portanto NAO e ele que bloqueia.
          *
          * gControllerRaw e um vetor de estruturas de 40 bytes (o codigo usa
-         * i*40). O offset 0 e zerado de proposito a cada quadro, e +0x10/+0x14
-         * recebem o analogico escalado por 80.0. Onde o BOTAO cai ainda nao
-         * foi identificado - despejar a estrutura inteira responde isso sem
-         * precisar ler mais assembly recompilado. */
-        printf("[ctrl-raw] #%u pad=%04X errno=%02X portao=%08X\n"
+         * i*40). Mapa ja identificado por medicao:
+         *   +0x00  zerado de proposito a cada quadro (nao e defeito)
+         *   +0x04  botoes MANTIDOS
+         *   +0x06  botoes PRESSIONADOS neste quadro (borda)
+         *   +0x10  analogico X, float escalado por 80.0
+         *   +0x14  analogico Y
+         *
+         * O estado da maquina entra na mesma linha para correlacionar toque e
+         * reacao: e a unica forma de ver se apertar START em 8/26 muda algo. */
+        printf("[ctrl-raw] #%u pad=%04X errno=%02X estado=%u/%u portao=%08X\n"
                "           raw[40]:", n, pad_depois,
-               rdram[(0x0018255Cu) ^ 3u], rd32(rdram, 0x801824D4u));
+               rdram[(0x0018255Cu) ^ 3u],
+               /* Os dois estados sao meias-palavras: ler como palavra devolve
+                * o valor deslocado 16 bits (1 aparecia como 65536). */
+               rdram16(rdram, 0x001A7234u), rdram16(rdram, 0x001A723Cu),
+               rd32(rdram, 0x801824D4u));
         for (uint32_t k = 0; k < 40u; k += 4)
             printf(" %08X", rd32(rdram, 0x80180DA8u + k));
         printf("\n");
@@ -1461,6 +1507,9 @@ int hle_deliver_events(uint8_t* rdram) {
      *
      * O limite evita que um acumulo grande sature de uma vez a fila de oito
      * mensagens do jogo. */
+    /* Antes da entrega, e nao depois: assim o relatorio mostra o estado que o
+       laco abaixo vai encontrar, incluindo o acumulo de pendentes. */
+    pif_relatorio_periodico();
     if (EVENT_ON(OS_EVENT_SI)) {
         for (int n = 0; n < 8 && pif_si_done_pending(); n++) {
             if (!post_event(rdram, OS_EVENT_SI)) break;

@@ -1,18 +1,24 @@
 # Análise consolidada do áudio
 
-Atualizado em 20/08/2026. Este documento contém somente resultados ainda
+Atualizado em 23/08/2026. Este documento contém somente resultados ainda
 válidos, limites demonstrados e o próximo experimento. Tentativas rejeitadas
 foram removidas do corpo principal; o histórico completo permanece no Git.
 
 ## 1. Estado atual
 
-O runtime reproduz a música original de forma reconhecível, mas ainda há
-trechos intermitentes de chiado/aspereza e alguns estalos. Há passagens limpas,
-inclusive uma música posterior de flauta, o que mostra que a saída não está
-globalmente danificada.
+Foi encontrada e corrigida uma causa estrutural para o chiado: o PI DMA usava
+`memcpy` entre ROM e RDRAM word-swapped mesmo quando origem e destino tinham
+alinhamentos módulo 4 diferentes. O callback de amostras do jogo alinha a
+origem apenas em 2 bytes; nesses blocos o runtime trocava pares do ADPCM.
 
-O defeito é bloqueador para o projeto. A investigação deixou de ser tentativa
-auditiva: existe agora uma fronteira reproduzível e alinhada ao Project64.
+Em teste local, a correção levou o DC médio de `+202,0` para `-16,8`, próximo
+do Project64 (`~ -20`), sem cortar reverb, vozes ou ganho. O teste auditivo do
+usuário confirmou que o chiado praticamente desapareceu; restam somente
+estalos muito raros e bem espaçados, não bloqueadores.
+
+O chiado deixou de ser bloqueador. A fronteira reproduzível levou ao cache de
+amostras e a comparação com os fontes revelou a violação de endianess. Os
+estalos residuais ficam como refinamento posterior.
 
 ### Primeira divergência válida
 
@@ -72,9 +78,9 @@ runtime converte big-endian → little-endian
 WAV de diagnóstico e saída WinMM
 ```
 
-O perfil canônico de teste é `audio_rsp_exato`, selecionado por padrão em
-`TESTAR.bat`. Ele usa o microcódigo real recompilado; o HLE C permanece apenas
-como ferramenta de comparação e fallback histórico.
+Essa rota agora é o padrão de `TESTAR.bat`: microcódigo real recompilado,
+cadência virtual do AI e cópia PI lógica. `audio_fonte` permanece como nome
+explícito equivalente; o HLE C é usado somente por perfis diagnósticos.
 
 ## 3. Fatos demonstrados
 
@@ -177,6 +183,18 @@ para explicá-lo. Em passagens fortes, o RMS local fica próximo da referência.
 Reduzir ganho apenas reduz volume; não remove o chiado. Métricas de divergência
 sem RMS e DC são inválidas porque premiam silêncio.
 
+### 3.9 O cache de amostras exigia cópia PI lógica
+
+O cruzamento de `wonder-source`, `libreultra` e do código recompilado mapeou
+`func_800B937C`/`func_800B9068` como `ALDMANew`/`ALDMAproc`. A origem do bloco
+é alinhada somente em 2 bytes e o destino é alinhado. Por isso, `memcpy` sobre
+as representações word-swapped corrompia blocos cuja origem era `2 (mod 4)`.
+
+Após corrigir ambos os caminhos PI, uma execução exerceu 78 realinhamentos
+(159.744 bytes). DC: `+202,0 -> -16,8`; RMS: `5538 -> 4782`; pico:
+`32766 -> 28761`; saturações permaneceram zero. O relatório detalhado está em
+`analise/projeto/audio_dma_pi_endian.md`.
+
 ## 4. Referências preservadas
 
 ### Project64
@@ -226,36 +244,13 @@ sem RMS e DC são inválidas porque premiam silêncio.
 
 ## 6. Próximo experimento
 
-Capturar a entrada integral da tarefa que **produz** a primeira divergência:
-
-```text
-local 43  ↔  Project64 58
-```
-
-Como o índice absoluto pode deslizar entre execuções, a sonda deve selecionar
-a décima tarefa após a primeira AList musical alinhada, não um número absoluto.
-
-Preservar somente:
-
-- AList completa antes do RSP;
-- RDRAM lógica antes da tarefa;
-- estados ADPCM/RESAMPLE/ENVMIX antes e depois;
-- PCM produzido;
-- metadados de tarefa e hashes.
-
-Comparar os arquivos Project64 `load_cmd*`, `book_cmd*` e os estados da tarefa
-58 contra as regiões correspondentes da RDRAM local. O primeiro bloco de
-entrada diferente decide o próximo ramo:
-
-- `load_cmd*` diferente: investigar DMA/sample cache e ordem da CPU;
-- `book_cmd*` diferente: investigar carregamento do codebook;
-- todos os dados iguais, mas saída diferente: reproduzir a tarefa local
-  offline com sua RDRAM integral e comparar DMEM por comando;
-- saída offline correta: investigar a memória/DMEM entregue ao RSP ao vivo.
-
-Critério de sucesso imediato: identificar o primeiro comando ADPCM/RESAMPLE
-que consome bytes diferentes, com endereço, tamanho e os dois hashes. Não
-tentar corrigir o som antes dessa prova.
+1. Executar `TESTAR.bat audio_fonte` e ouvir os quatro trechos antes marcados.
+2. Se o chiado tiver desaparecido, repetir a captura profunda do Project64 e
+   alinhar por hash de AList, não pelo índice absoluto antigo.
+3. Confirmar que os estados ADPCM/RESAMPLE permanecem iguais depois da antiga
+   fronteira 43/58.
+4. Se restar ruído, comparar somente o primeiro `load_cmd*` ainda divergente;
+   não voltar a alterar reverb, ganho ou ENVMIX sem nova evidência.
 
 ## 7. Critério de aceite final
 
