@@ -1,7 +1,7 @@
 @echo off
 setlocal
 REM Teste unificado da rota natural: abertura 2D -> transicao -> cena 3D/dialogo.
-REM Uso: TESTAR.bat [musica_limpa|musica_pura|audio_rsp_exato|audio_zelda_queue|legendas|antes_audio|audio_nativo|audio_nativo_clocked|audio_counter|audio_counter_vi|diagnostico_audio], TESTAR.bat voz N, sem_polef, sem_reverb ou ganho_baixo.
+REM Uso: TESTAR.bat [musica_limpa|musica_pura|audio_wonder|audio_rsp_exato|audio_zelda_queue|legendas|antes_audio|audio_nativo|audio_nativo_clocked|audio_counter|audio_counter_vi|diagnostico_audio], TESTAR.bat voz N, sem_polef, sem_reverb ou ganho_baixo.
 REM Nao ha limite de tempo;
 REM feche a janela para encerrar. "voz N" isola a voz N do ENVMIXER (0..4).
 REM
@@ -17,7 +17,7 @@ REM audio anterior a compatibilidade AI. Serve somente a comparacao de
 REM desempenho; o perfil padrao abaixo continua sendo o atual com audio.
 REM O duplo clique usa a sonda atual; um argumento ainda permite selecionar
 REM um perfil histórico sem criar outro .bat (por exemplo: TESTAR.bat legendas).
-set "WPJ2_PROFILE=audio_rsp_exato"
+set "WPJ2_PROFILE=legendas"
 if not "%~1"=="" set "WPJ2_PROFILE=%~1"
 set "WPJ2_EXE=wpj2_visual.exe"
 set "WPJ2_PROFILE_TAG=audio"
@@ -30,6 +30,7 @@ if /I "%WPJ2_PROFILE%"=="musica_pura" set "WPJ2_EXE=build\wpj2_musica_pura.exe"
 if /I "%WPJ2_PROFILE%"=="musica_limpa" set "WPJ2_EXE=build\wpj2_musica_limpa.exe"
 if /I "%WPJ2_PROFILE%"=="audio_zelda_queue" set "WPJ2_EXE=build\wpj2_audio_zelda_queue.exe"
 if /I "%WPJ2_PROFILE%"=="audio_rsp_exato" set "WPJ2_EXE=build\wpj2_audio_rsp_exato.exe"
+if /I "%WPJ2_PROFILE%"=="audio_wonder" set "WPJ2_EXE=build\wpj2_legendas_check.exe"
 if /I "%WPJ2_PROFILE%"=="antes_audio" (
   set "WPJ2_EXE=wpj2_visual_antes_audio_compat.exe"
   set "WPJ2_PROFILE_TAG=antes_audio_compat"
@@ -49,6 +50,7 @@ if /I "%WPJ2_PROFILE%"=="musica_pura" set "WPJ2_PROFILE_TAG=musica_pura"
 if /I "%WPJ2_PROFILE%"=="musica_limpa" set "WPJ2_PROFILE_TAG=musica_limpa"
 if /I "%WPJ2_PROFILE%"=="audio_zelda_queue" set "WPJ2_PROFILE_TAG=audio_zelda_queue"
 if /I "%WPJ2_PROFILE%"=="audio_rsp_exato" set "WPJ2_PROFILE_TAG=audio_rsp_exato"
+if /I "%WPJ2_PROFILE%"=="audio_wonder" set "WPJ2_PROFILE_TAG=audio_wonder_fiel"
 set "WPJ2_AUDIO_VOICE=-1"
 if /I "%WPJ2_PROFILE%"=="voz" (
   set "WPJ2_AUDIO_VOICE=%~2"
@@ -76,6 +78,7 @@ if /I "%WPJ2_PROFILE%"=="musica_pura" set "WPJ2_CAPTURE_DIR=%~dp0temp\projeto\te
 if /I "%WPJ2_PROFILE%"=="musica_limpa" set "WPJ2_CAPTURE_DIR=%~dp0temp\projeto\testar\musica_limpa"
 if /I "%WPJ2_PROFILE%"=="audio_zelda_queue" set "WPJ2_CAPTURE_DIR=%~dp0temp\projeto\testar\audio_zelda_queue"
 if /I "%WPJ2_PROFILE%"=="audio_rsp_exato" set "WPJ2_CAPTURE_DIR=%~dp0temp\projeto\testar\audio_rsp_exato"
+if /I "%WPJ2_PROFILE%"=="audio_wonder" set "WPJ2_CAPTURE_DIR=%~dp0temp\projeto\testar\audio_wonder"
 if not exist "%WPJ2_CAPTURE_DIR%" mkdir "%WPJ2_CAPTURE_DIR%"
 set "WPJ2_RUN_METRICS=%WPJ2_CAPTURE_DIR%\run_metrics.txt"
 del /q "%WPJ2_CAPTURE_DIR%\f5_*.bmp" >nul 2>nul
@@ -83,6 +86,8 @@ del /q "%WPJ2_CAPTURE_DIR%\f5_*.txt" >nul 2>nul
 del /q "%WPJ2_CAPTURE_DIR%\historico_*.bmp" >nul 2>nul
 del /q "%WPJ2_CAPTURE_DIR%\historico.txt" >nul 2>nul
 if /I "%WPJ2_PROFILE%"=="legendas" del /q "%WPJ2_CAPTURE_DIR%\legendas_rota.tsv" >nul 2>nul
+if /I "%WPJ2_PROFILE%"=="legendas" del /q "%WPJ2_CAPTURE_DIR%\legendas_rdram_f5_*.tsv" >nul 2>nul
+if /I "%WPJ2_PROFILE%"=="legendas" del /q "%WPJ2_CAPTURE_DIR%\legendas_rdram_f5_*.bin" >nul 2>nul
 if /I "%WPJ2_PROFILE%"=="estado_audio" rmdir /s /q "%WPJ2_CAPTURE_DIR%\state_oracle" >nul 2>nul
 if /I "%WPJ2_PROFILE%"=="audio550" rmdir /s /q "%WPJ2_CAPTURE_DIR%\audio_task" >nul 2>nul
 if /I "%WPJ2_PROFILE%"=="diagnostico_audio" rmdir /s /q "%WPJ2_CAPTURE_DIR%\audio_post" >nul 2>nul
@@ -111,6 +116,7 @@ if /I "%WPJ2_PROFILE%"=="musica_pura" set "WPJ2_WINDOW_TITLE=Wonder Project J2 -
 if /I "%WPJ2_PROFILE%"=="musica_limpa" set "WPJ2_WINDOW_TITLE=Wonder Project J2 - musica limpa (sem vozes, eco e filtro)"
 if /I "%WPJ2_PROFILE%"=="audio_zelda_queue" set "WPJ2_WINDOW_TITLE=Wonder Project J2 - fila de audio Zelda64Recomp"
 if /I "%WPJ2_PROFILE%"=="audio_rsp_exato" set "WPJ2_WINDOW_TITLE=Wonder Project J2 - audio RSP nativo"
+if /I "%WPJ2_PROFILE%"=="audio_wonder" set "WPJ2_WINDOW_TITLE=Wonder Project J2 - audio fiel ao driver original"
 set "WPJ2_WINDOW_HOLD_LAST=0"
 set "WPJ2_RETRACE=60"
 set "WPJ2_PREEMPT_EVERY_POLL=0"
@@ -138,6 +144,7 @@ REM Teste causal: muda somente o sintetizador. Cadencia virtual, contador e
 REM fila Zelda permanecem desligados, eliminando a mistura de variaveis do
 REM antigo perfil audio_nativo.
 if /I "%WPJ2_PROFILE%"=="audio_rsp_exato" set "WPJ2_NATIVE_AUDIO_RSP=1"
+if /I "%WPJ2_PROFILE%"=="audio_wonder" set "WPJ2_NATIVE_AUDIO_RSP=1"
 set "WPJ2_AI_TIMED=0"
 REM A fila de dois DMAs baseada no libreultra permanece disponivel por
 REM WPJ2_AI_TIMED=1, mas o teste auditivo nao alterou o chiado. O perfil normal
@@ -226,6 +233,10 @@ set "WPJ2_AI_TIMED=0"
 if /I "%WPJ2_PROFILE%"=="antes_audio" (
   set "WPJ2_AI_TIMED=1"
 )
+REM Perfil mais fiel possível ao wonder-source: o driver MIPS original gera
+REM as ALists, o microcódigo recompilado as executa e a AI usa FIFO de dois
+REM DMAs na duração real. Não há cadência virtual nem efeitos desabilitados.
+if /I "%WPJ2_PROFILE%"=="audio_wonder" set "WPJ2_AI_TIMED=1"
 set "WPJ2_TMEM_INTERLEAVE=1"
 REM Sonda RGBA16 rejeitada: esta carga especifica nao usa a permuta aplicada
 REM pela implementacao local. Mantemos 0 como referencia estavel.
@@ -302,6 +313,25 @@ if /I "%WPJ2_PROFILE%"=="audio_rsp_exato" (
   set "WPJ2_ALPHA_TRACE="
   set "WPJ2_TRI_ALPHA_TRACE="
   set "WPJ2_TRANSITION_TRACE="
+)
+if /I "%WPJ2_PROFILE%"=="audio_wonder" (
+  set "WPJ2_TEXRECT_TRACE="
+  set "WPJ2_STATUS_TIMELINE="
+  set "WPJ2_ALPHA_TRACE="
+  set "WPJ2_TRI_ALPHA_TRACE="
+  set "WPJ2_TRANSITION_TRACE="
+  set "WPJ2_AUDIO_STATE_CAPTURE="
+)
+REM No perfil de legendas, F5 precisa registrar somente imagem, estado e os
+REM 8 MB de RDRAM. Sondas continuas e a captura de AList deslocam a cadencia e
+REM nao ajudam a localizar o fluxo de texto codificado.
+if /I "%WPJ2_PROFILE%"=="legendas" (
+  set "WPJ2_TEXRECT_TRACE="
+  set "WPJ2_STATUS_TIMELINE="
+  set "WPJ2_ALPHA_TRACE="
+  set "WPJ2_TRI_ALPHA_TRACE="
+  set "WPJ2_TRANSITION_TRACE="
+  set "WPJ2_AUDIO_STATE_CAPTURE="
 )
 
 if not exist "%~dp0%WPJ2_EXE%" (

@@ -132,8 +132,8 @@ tools\env.cmd
 :: 2. Generate the recompiled C from your ROM, then build
 tools\build_probe.cmd
 
-:: 3. Run with a window and keyboard
-JOGAR.bat
+:: 3. Run the current test profile with a window and keyboard
+TESTAR.bat
 ```
 
 ### Keyboard / Teclado
@@ -156,7 +156,12 @@ JOGAR.bat
 | Path | |
 |---|---|
 | `runtime/` | The runtime: scheduler, HLE, RSP/RDP, audio, video, PIF |
-| `tools/` | Build scripts and analysis tooling (Python) |
+| `src/` | Project-owned scripts, tests, generated recompilation sources and build configuration |
+| `textos/` | Local, ROM-derived text catalogs; intentionally ignored by Git |
+| `analise/` | Consolidated, already-reviewed findings split by project/oracle origin |
+| `temp/` | Disposable output from the next test; it is consumed, consolidated and cleaned |
+| `tools/` | Build scripts and third-party reference projects |
+| `TESTAR.bat` | Main entry point for interactive and diagnostic tests |
 | `*.md` | Investigation records — see below |
 
 ### Documentation / Documentação
@@ -195,6 +200,9 @@ separadamente se precisar.
 | [N64ModernRuntime](https://github.com/N64Recomp/N64ModernRuntime) | Reference runtime (`librecomp` / `ultramodern`). Our native libultra replacements follow its model. |
 | [Zelda64Recomp](https://github.com/Zelda64Recomp/Zelda64Recomp) | Reference for how a working recompilation wires input and video. |
 | [Project64](https://github.com/project64/project64) | Emulator, used as a behavioural oracle for graphics and audio comparisons. |
+| [wonder](https://github.com/LLONSIT-glitch/wonder) | Wonder Project J2 decompilation reference used to confirm game functions and improve text, audio, graphics and input mappings. |
+| [libreultra](https://github.com/n64decomp/libreultra) | Open libultra implementation used as an API and behaviour reference. |
+| [sdk-tools](https://github.com/n64decomp/sdk-tools) | Nintendo 64 SDK analysis tools used as an additional decompilation reference. |
 
 ---
 

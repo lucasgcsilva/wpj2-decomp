@@ -11,8 +11,8 @@ dentro do jogo.
 ## Como testar
 
 ```
-JOGAR.bat            janela + teclado, áudio leve
-JOGAR.bat 300 audio  o mesmo, com síntese completa
+TESTAR.bat            janela + teclado no perfil atual
+TESTAR.bat audio      teste com o perfil de áudio selecionado
 ```
 
 Teclas: **Enter**=START, **X**/Espaço=A, **Z**=B, **C**=Z, **A**/**S**=L/R,
@@ -129,7 +129,7 @@ aparece nesta busca) — provavelmente vizinha das duas.
 2. Escrever as nativas no modelo acima, lendo o `g_buttons`.
 3. Registrar em `native_overrides.txt` (o build já usa esse mecanismo para
    `func_800CCAE4` e `func_800CBBB0`).
-4. Compilar e testar com `JOGAR.bat`.
+4. Compilar e testar com `TESTAR.bat`.
 
 O `pif.c` não precisa ser removido — continua servindo à inicialização. Só
 sai do caminho crítico da entrada.
@@ -156,7 +156,7 @@ funcionar.
 
 1. **Medir num arranjo e concluir sobre outro.** A cadência de ~10 Hz veio de
    sondas sem janela e com o áudio pulado; o comportamento real (leituras que
-   param) só apareceu no `JOGAR.bat`.
+   param) só apareceu na execução interativa hoje centralizada no `TESTAR.bat`.
 2. **Interpretar rajada de boot como regime permanente.** As 11 leituras
    iniciais foram lidas como "10 leituras por segundo, continuamente".
 3. **Script sem `setlocal`.** `WPJ2_INPUT_POLLS` vazava para o console e

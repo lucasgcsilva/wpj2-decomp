@@ -23,6 +23,41 @@ static uint64_t g_pi_transfers = 0;
 static uint64_t g_pi_bytes = 0;
 static uint64_t g_pi_rejected = 0;
 
+/* O carregador devolve a fonte em v0 e entrega a copia alocada pelo quinto
+ * argumento. A traducao precisa atingir essa copia: e ela que o formatador do
+ * jogo consumira para gerar os glifos e a digitacao progressiva. */
+void func_80096B38__replaced(uint8_t* rdram, recomp_context* ctx);
+void func_80096B38(uint8_t* rdram, recomp_context* ctx) {
+    uint32_t output_storage = (uint32_t)MEM_W(0x10, ctx->r29);
+    func_80096B38__replaced(rdram, ctx);
+    uint32_t storage_phys = output_storage & 0x1FFFFFFFu;
+    if (storage_phys + 4u <= 0x00400000u) {
+        uint32_t resource = (uint32_t)MEM_W(0, (gpr)(int32_t)output_storage);
+        legendas_substituir_recurso(rdram, resource);
+    }
+    /* A captura F5 provou que a copia acima fica PT-BR, mas o compositor ainda
+     * le a cadeia inglesa. v0 conserva a fonte resolvida por esta rotina e o
+     * chamador pode consumi-la diretamente. Substituir tambem essa referencia
+     * cobre as duas saidas sem alterar ponteiros nem desenhar sobre a imagem. */
+    legendas_substituir_recurso(rdram, (uint32_t)ctx->r2);
+}
+
+/* Textos estáticos, créditos e cartões de localização podem chegar direto ao
+ * formatador, sem passar pelo carregador 80096B38. A assinatura confirmada no
+ * wonder-source é char**. Substituímos apenas quando o ponteiro ainda contém
+ * uma chave completa do TSV; nenhum cursor privado ou desenho sobreposto é
+ * usado. A busca por prefixo mantém esta rota barata. */
+void func_80090E58__replaced(uint8_t* rdram, recomp_context* ctx);
+void func_80090E58(uint8_t* rdram, recomp_context* ctx) {
+    uint32_t args = (uint32_t)ctx->r4;
+    uint32_t args_phys = args & 0x1FFFFFFFu;
+    if (args_phys + 4u <= 0x00400000u) {
+        uint32_t source = (uint32_t)MEM_W(0, (gpr)(int32_t)args);
+        legendas_substituir_recurso(rdram, source);
+    }
+    func_80090E58__replaced(rdram, ctx);
+}
+
 /* O alocador e mantido recompilado; os wrappers abaixo so registram as
  * alocacoes que se tornam fonte dos LOADBLOCKs. */
 void func_800BC6EC__replaced(uint8_t* rdram, recomp_context* ctx);
@@ -221,17 +256,6 @@ void func_80094230(uint8_t* rdram, recomp_context* ctx) {
             (uint32_t)ctx->r7, tabela, fonte, rdram[fonte ^ 3u], (uint8_t)modo };
     }
     func_80094230__replaced(rdram, ctx);
-}
-
-/* O formatador da ROM atualiza o ponteiro de entrada a cada caractere. A
- * camada de legendas substitui-o somente durante a chamada e o restaura com
- * o deslocamento equivalente antes do retorno ao jogo. */
-void func_80090E58__replaced(uint8_t* rdram, recomp_context* ctx);
-void func_80090E58(uint8_t* rdram, recomp_context* ctx) {
-    uint32_t args = (uint32_t)ctx->r4;
-    legendas_antes(rdram, args);
-    func_80090E58__replaced(rdram, ctx);
-    legendas_depois(rdram, args);
 }
 
 void hle_texto_report(const char* prefixo) {
@@ -1408,9 +1432,15 @@ int hle_deliver_events(uint8_t* rdram) {
     /* A conclusao AI e determinada pela duracao PCM do DMA primario, e nao
        por um retrace arbitrario. Isso reproduz BUSY/FIFO do hardware e evita
        que a thread de audio avance quase duas vezes cedo demais. */
-    if (EVENT_ON(OS_EVENT_AI) && audio_ai_done_pending()
-        && post_event(rdram, OS_EVENT_AI)) {
+    if (audio_ai_done_pending()) {
+        /* O dispositivo retira o DMA concluído e promove o segundo slot antes
+         * de levantar a interrupção. A ordem antiga acordava imediatamente a
+         * thread de áudio dentro de post_event enquanto FIFO_FULL ainda
+         * refletia os dois slots antigos; osAiSetNextBuffer então rejeitava o
+         * próximo bloco e a fila nunca voltava a ser alimentada. O avanço do
+         * hardware também independe de a interrupção estar mascarada. */
         audio_take_ai_done();
+        if (EVENT_ON(OS_EVENT_AI)) post_event(rdram, OS_EVENT_AI);
     }
     /* O post incondicional de SP e DP fica de fora, e a decisao e deliberada.
      *

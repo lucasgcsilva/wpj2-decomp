@@ -29,6 +29,7 @@ analise/oraculo/graficos/
 analise/oraculo/imagens/
 analise/projeto/codigo/
 analise/projeto/graficos_historico/
+analise/projeto/legendas/
 src/gerado/
 
 # Conteudo extraido do jogo
@@ -72,6 +73,7 @@ tools/python-deps/
 tools/josette/
 tools/libreultra/
 tools/sdk-tools/
+tools/wonder-source/
 
 # ---------------------------------------------------------------------------
 # Artefatos de build e de sondagem / Build and probe artifacts

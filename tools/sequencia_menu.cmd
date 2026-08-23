@@ -17,7 +17,7 @@ REM   sequencia_menu.cmd 25 "300:1000;303:0000"   aperta START na leitura 300
 REM setlocal e obrigatorio: sem ele o WPJ2_INPUT_POLLS definido aqui vazava
 REM para o console e continuava valendo em execucoes seguintes. Um roteiro
 REM gravado faz o botoes_agora() ignorar o teclado por completo, e quem
-REM rodasse o JOGAR.bat na mesma janela nao conseguia apertar nada.
+REM rodasse o TESTAR.bat na mesma janela nao conseguia apertar nada.
 setlocal
 call "E:\projetos\project-wonder-j2-decomp\tools\env.cmd"
 cd /d "%PROJ%"

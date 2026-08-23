@@ -4,11 +4,11 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* Intercepta, de forma opcional, a cadeia entregue ao formatador do jogo.
- * As duas chamadas devem envolver imediatamente o corpo recompilado. */
-void legendas_antes(uint8_t* rdram, uint32_t args);
-void legendas_depois(uint8_t* rdram, uint32_t args);
 void legendas_aplicar_cartucho(uint8_t* cart, size_t rom_size);
 void legendas_capturar_rdram(uint8_t* rdram, const char* directory, unsigned id);
+/* Substitui em memoria um recurso textual que o carregador acabou de copiar.
+ * O endereco permanece o mesmo: assim o formatador, a fonte e a digitacao do
+ * jogo continuam sendo os responsaveis pela exibicao. */
+int legendas_substituir_recurso(uint8_t* rdram, uint32_t pointer);
 
 #endif

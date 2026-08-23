@@ -15,6 +15,7 @@ analise/
 │   ├── audio_primeira_divergencia.md
 │   ├── configuracoes_audio.md
 │   ├── inventario_execucao.md
+│   ├── texto/
 │   ├── graficos_historico/
 │   └── codigo/
 │       ├── callgraph.txt

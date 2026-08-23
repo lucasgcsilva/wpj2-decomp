@@ -1,10 +1,5 @@
-/* Legendas PT-BR experimentais para o formatador interno de Wonder Project J2.
- *
- * A ROM avanca o ponteiro da cadeia a cada chamada para fazer a digitacao
- * progressiva. Nesta primeira versao, cada traducao ocupa exatamente o mesmo
- * numero de bytes da cadeia inglesa: texto maior e cortado, texto menor recebe
- * espacos. Assim o cursor que a ROM grava de volta continua valido. A camada
- * so existe quando WPJ2_LEGENDAS aponta para o TSV, ou vale 1. */
+/* Legendas PT-BR aplicadas ao recurso textual completo de Wonder Project J2.
+ * A camada so existe quando WPJ2_LEGENDAS aponta para o TSV, ou vale 1. */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -14,12 +9,11 @@
 
 #include "legendas.h"
 
-#define RDRAM_LIMIT          0x00400000u /* o jogo foi inicializado como 4 MB */
-#define SCRATCH_BASE         0x007F0000u /* metade alta reservada ao host */
+#define RDRAM_LIMIT          0x00400000u /* ponteiros de texto normais do jogo */
+#define RDRAM_DUMP_BYTES     0x00800000u /* mapeamento completo do host */
 #define SCRATCH_SLOT_BYTES   1024u
-#define MAX_ENTRIES          4096u
+#define MAX_ENTRIES          8192u
 #define MAX_TEXT             511u
-#define MAX_ACTIVE           16u
 #define HASH_BUCKETS         8191u
 
 typedef struct {
@@ -29,37 +23,32 @@ typedef struct {
     int next;
 } subtitle_entry_t;
 
-typedef struct {
-    uint32_t args_phys;
-    uint32_t source_base;
-    uint32_t scratch_phys;
-    uint16_t length;
-    int used;
-} active_subtitle_t;
-
 static subtitle_entry_t g_entries[MAX_ENTRIES];
 static size_t g_entry_count;
 static int g_prefix_buckets[HASH_BUCKETS];
-static active_subtitle_t g_active[MAX_ACTIVE];
 static int g_initialized;
 static int g_enabled;
-static int g_scratch_committed;
 static FILE* g_trace;
 static uint32_t g_trace_lines;
+static subtitle_entry_t* find_entry(const char* source);
+static void trace_source(const char* status, const char* source);
 
-typedef struct {
-    active_subtitle_t* active;
-    uint32_t args_phys;
-    int bound;
-} binding_t;
-static binding_t g_binding;
-
-static uint32_t rd32(uint8_t* rdram, uint32_t phys) {
-    return *(uint32_t*)(rdram + phys);
-}
-
-static void wr32(uint8_t* rdram, uint32_t phys, uint32_t value) {
-    *(uint32_t*)(rdram + phys) = value;
+static void decode_escapes(char* text) {
+    char* read = text;
+    char* write = text;
+    while (*read) {
+        if (*read == '\\' && read[1]) {
+            read++;
+            if (*read == 'n') *write++ = '\n';
+            else if (*read == 'r') *write++ = '\r';
+            else if (*read == 't') *write++ = '\t';
+            else *write++ = *read;
+            read++;
+        } else {
+            *write++ = *read++;
+        }
+    }
+    *write = '\0';
 }
 
 static uint8_t rd8(uint8_t* rdram, uint32_t phys) {
@@ -99,15 +88,23 @@ static char fold_utf8(const unsigned char* s, size_t* advance) {
     return '?';
 }
 
-static void make_fixed_ascii(char* out, size_t bytes, const char* text) {
+static size_t make_ascii(char* out, size_t capacity, const char* text) {
     size_t in = 0, written = 0;
-    while (text[in] && written < bytes) {
+    if (!capacity) return 0;
+    while (text[in] && written + 1u < capacity) {
         size_t advance;
         out[written++] = fold_utf8((const unsigned char*)text + in, &advance);
         in += advance;
     }
+    out[written] = '\0';
+    return written;
+}
+
+static size_t make_fixed_ascii(char* out, size_t bytes, const char* text) {
+    size_t written = make_ascii(out, bytes + 1u, text);
     while (written < bytes) out[written++] = ' ';
     out[bytes] = '\0';
+    return written;
 }
 
 static uint32_t prefix_key_text(const char* text) {
@@ -133,7 +130,13 @@ static void init_once(void) {
     FILE* file = fopen(path, "rb");
     if (!file) return;
     char line[2048];
-    if (!fgets(line, sizeof(line), file) || strcmp(line, "source_en\tpt_br\n")) {
+    if (!fgets(line, sizeof(line), file)) {
+        fclose(file);
+        return;
+    }
+    char* header_end = strpbrk(line, "\r\n");
+    if (header_end) *header_end = '\0';
+    if (strcmp(line, "source_en\tpt_br")) {
         fclose(file);
         return;
     }
@@ -143,6 +146,8 @@ static void init_once(void) {
         *tab++ = '\0';
         char* end = strpbrk(tab, "\r\n");
         if (end) *end = '\0';
+        decode_escapes(line);
+        decode_escapes(tab);
         size_t source_len = strlen(line);
         if (!source_len || !*tab || source_len > MAX_TEXT) continue;
         subtitle_entry_t* entry = &g_entries[g_entry_count];
@@ -164,109 +169,134 @@ static void init_once(void) {
     }
 }
 
+int legendas_substituir_recurso(uint8_t* rdram, uint32_t pointer) {
+    init_once();
+    if (!g_enabled) return 0;
+
+    uint32_t phys = pointer & 0x1FFFFFFFu;
+    if (phys >= RDRAM_LIMIT) return 0;
+
+    char source[MAX_TEXT + 1];
+    typedef struct {
+        uint16_t source_offset;
+        uint16_t translated_offset;
+        uint8_t code, argument;
+    } text_control_t;
+    text_control_t controls[32];
+    size_t source_n = 0, raw_n = 0, control_n = 0;
+    int terminated = 0;
+    while (raw_n < MAX_TEXT && phys + raw_n < RDRAM_LIMIT) {
+        uint8_t value = rd8(rdram, phys + (uint32_t)raw_n++);
+        if (!value) {
+            terminated = 1;
+            raw_n--;
+            break;
+        }
+        /* O patch inglês usa E0/E1/E2 + argumento para pausa, variável e cor
+         * do falante. Eles não pertencem à chave pesquisável, mas precisam
+         * sobreviver à troca para o compositor manter o mesmo comportamento. */
+        if (value >= 0xE0u && value <= 0xE2u &&
+            raw_n < MAX_TEXT && phys + raw_n < RDRAM_LIMIT) {
+            uint8_t arg = rd8(rdram, phys + (uint32_t)raw_n++);
+            if (control_n < sizeof(controls) / sizeof(controls[0])) {
+                controls[control_n].source_offset = (uint16_t)source_n;
+                controls[control_n].code = value;
+                controls[control_n].argument = arg;
+                control_n++;
+            }
+            continue;
+        }
+        if (value == '\n' || value == '\r' ||
+            (value >= 0x20u && value <= 0x7Eu)) {
+            source[source_n++] = (char)value;
+        } else {
+            return 0;
+        }
+    }
+    if (!terminated) return 0;
+    while (source_n && (source[source_n - 1] == '\n' || source[source_n - 1] == '\r'))
+        source_n--;
+    source[source_n] = '\0';
+    if (source_n < 4u) return 0;
+
+    subtitle_entry_t* entry = find_entry(source);
+    if (!entry) return 0;
+
+    char translated[SCRATCH_SLOT_BYTES];
+    size_t translated_n = make_ascii(translated, sizeof(translated), entry->translated);
+    size_t encoded_n = translated_n + control_n * 2u;
+    if (!translated_n || encoded_n > raw_n) {
+        trace_source("recurso_ptbr_longo", source);
+        return 0;
+    }
+
+    const char* source_colon = strchr(source, ':');
+    const char* translated_colon = strchr(translated, ':');
+    size_t source_colon_pos = source_colon ? (size_t)(source_colon - source) : source_n;
+    size_t translated_colon_pos = translated_colon ?
+        (size_t)(translated_colon - translated) : translated_n;
+    for (size_t i = 0; i < control_n; i++) {
+        size_t offset = controls[i].source_offset;
+        size_t mapped;
+        if (!offset) {
+            mapped = 0;
+        } else if (offset >= source_n) {
+            mapped = translated_n;
+        } else if (source_colon && translated_colon && offset <= source_colon_pos) {
+            mapped = source_colon_pos ?
+                (offset * translated_colon_pos) / source_colon_pos : 0;
+        } else if (source_colon && translated_colon) {
+            mapped = translated_colon_pos + (offset - source_colon_pos);
+        } else {
+            mapped = source_n ? (offset * translated_n) / source_n : 0;
+        }
+        if (mapped > translated_n) mapped = translated_n;
+        controls[i].translated_offset = (uint16_t)mapped;
+    }
+
+    size_t out = 0;
+    for (size_t pos = 0; pos <= translated_n; pos++) {
+        for (size_t i = 0; i < control_n; i++) {
+            if (controls[i].translated_offset == pos) {
+                wr8(rdram, phys + (uint32_t)out++, controls[i].code);
+                wr8(rdram, phys + (uint32_t)out++, controls[i].argument);
+            }
+        }
+        if (pos < translated_n)
+            wr8(rdram, phys + (uint32_t)out++, (uint8_t)translated[pos]);
+    }
+    while (out <= raw_n)
+        wr8(rdram, phys + (uint32_t)out++, 0);
+    trace_source("recurso_ptbr_nativo", source);
+    return 1;
+}
+
 static void trace_source(const char* status, const char* source) {
     if (!g_trace || g_trace_lines++ >= 2048u) return;
-    fprintf(g_trace, "%s\t%s\n", status, source);
+    fprintf(g_trace, "%s\t", status);
+    for (const unsigned char* p = (const unsigned char*)source; *p; p++) {
+        if (*p == '\n') fputs("\\n", g_trace);
+        else if (*p == '\r') fputs("\\r", g_trace);
+        else if (*p == '\t') fputs("\\t", g_trace);
+        else fputc(*p, g_trace);
+    }
+    fputc('\n', g_trace);
     fflush(g_trace);
 }
 
-static int read_source(uint8_t* rdram, uint32_t pointer, char* out) {
-    uint32_t phys = pointer & 0x1FFFFFFFu;
-    if (phys >= RDRAM_LIMIT) return 0;
-    for (uint32_t i = 0; i <= MAX_TEXT && phys + i < RDRAM_LIMIT; i++) {
-        uint8_t value = rd8(rdram, phys + i);
-        out[i] = (char)value;
-        if (!value) return 1;
-        if (value < 0x20u || value > 0x7Eu) return 0;
-    }
-    return 0;
-}
-
 static subtitle_entry_t* find_entry(const char* source) {
-    for (size_t i = 0; i < g_entry_count; i++)
-        if (!strcmp(g_entries[i].source, source)) return &g_entries[i];
+    if (strlen(source) < 4u) return NULL;
+    uint32_t bucket = prefix_key_text(source) % HASH_BUCKETS;
+    for (int index = g_prefix_buckets[bucket]; index >= 0;
+         index = g_entries[index].next)
+        if (!strcmp(g_entries[index].source, source)) return &g_entries[index];
     return NULL;
-}
-
-static active_subtitle_t* allocate_active(uint32_t args_phys, uint32_t source_base,
-                                          subtitle_entry_t* entry, uint8_t* rdram) {
-    active_subtitle_t* slot = NULL;
-    for (size_t i = 0; i < MAX_ACTIVE; i++)
-        if (g_active[i].used && g_active[i].args_phys == args_phys) { slot = &g_active[i]; break; }
-    if (!slot)
-        for (size_t i = 0; i < MAX_ACTIVE; i++)
-            if (!g_active[i].used) { slot = &g_active[i]; break; }
-    if (!slot) slot = &g_active[args_phys % MAX_ACTIVE];
-    if (!g_scratch_committed) {
-        if (!VirtualAlloc(rdram + SCRATCH_BASE, MAX_ACTIVE * SCRATCH_SLOT_BYTES,
-                          MEM_COMMIT, PAGE_READWRITE))
-            return NULL;
-        g_scratch_committed = 1;
-    }
-    size_t index = (size_t)(slot - g_active);
-    slot->args_phys = args_phys;
-    slot->source_base = source_base;
-    slot->scratch_phys = SCRATCH_BASE + (uint32_t)(index * SCRATCH_SLOT_BYTES);
-    slot->length = entry->source_len;
-    slot->used = 1;
-    char fixed[MAX_TEXT + 1];
-    make_fixed_ascii(fixed, entry->source_len, entry->translated);
-    for (uint32_t i = 0; i <= entry->source_len; i++)
-        wr8(rdram, slot->scratch_phys + i, (uint8_t)fixed[i]);
-    return slot;
-}
-
-void legendas_antes(uint8_t* rdram, uint32_t args) {
-    g_binding.bound = 0;
-    init_once();
-    uint32_t args_phys = args & 0x1FFFFFFFu;
-    if (!g_enabled || args_phys + 4u > RDRAM_LIMIT) return;
-    uint32_t original = rd32(rdram, args_phys);
-    active_subtitle_t* active = NULL;
-    for (size_t i = 0; i < MAX_ACTIVE; i++) {
-        active_subtitle_t* candidate = &g_active[i];
-        uint32_t delta = original - candidate->source_base;
-        if (candidate->used && candidate->args_phys == args_phys && delta <= candidate->length) {
-            active = candidate;
-            break;
-        }
-    }
-    if (!active) {
-        char source[MAX_TEXT + 1];
-        if (!read_source(rdram, original, source)) return;
-        subtitle_entry_t* entry = find_entry(source);
-        if (!entry) {
-            trace_source("sem_traducao", source);
-            return;
-        }
-        trace_source("traduzido", source);
-        active = allocate_active(args_phys, original, entry, rdram);
-        if (!active) return;
-    }
-    uint32_t delta = original - active->source_base;
-    if (delta > active->length) return;
-    wr32(rdram, args_phys, 0x80000000u | (active->scratch_phys + delta));
-    g_binding.active = active;
-    g_binding.args_phys = args_phys;
-    g_binding.bound = 1;
-}
-
-void legendas_depois(uint8_t* rdram, uint32_t args) {
-    (void)args;
-    if (!g_binding.bound) return;
-    active_subtitle_t* active = g_binding.active;
-    uint32_t cursor = rd32(rdram, g_binding.args_phys) & 0x1FFFFFFFu;
-    if (cursor >= active->scratch_phys && cursor <= active->scratch_phys + active->length) {
-        uint32_t delta = cursor - active->scratch_phys;
-        wr32(rdram, g_binding.args_phys, active->source_base + delta);
-    }
-    g_binding.bound = 0;
 }
 
 void legendas_aplicar_cartucho(uint8_t* cart, size_t rom_size) {
     init_once();
     if (!g_enabled) return;
-    unsigned patched = 0;
+    unsigned patched = 0, skipped_long = 0;
     for (size_t pos = 0; pos + 4u <= rom_size; pos++) {
         uint32_t bucket = prefix_key_cart(cart, pos) % HASH_BUCKETS;
         for (int index = g_prefix_buckets[bucket]; index >= 0; index = g_entries[index].next) {
@@ -277,13 +307,22 @@ void legendas_aplicar_cartucho(uint8_t* cart, size_t rom_size) {
             while (i < length && cart[(pos + i) ^ 3u] == (uint8_t)entry->source[i]) i++;
             if (i != length) continue;
             char fixed[MAX_TEXT + 1];
+            char translated[MAX_TEXT + 1];
+            size_t translated_len = make_ascii(translated, sizeof(translated), entry->translated);
+            /* Uma cadeia maior sobrescreveria o recurso seguinte. Ela permanece
+             * inglesa no cartucho e sera expandida no interceptador dinamico. */
+            if (translated_len > length) {
+                skipped_long++;
+                continue;
+            }
             make_fixed_ascii(fixed, length, entry->translated);
             for (i = 0; i < length; i++) cart[(pos + i) ^ 3u] = (uint8_t)fixed[i];
             patched++;
         }
     }
     if (g_trace && g_trace_lines++ < 2048u) {
-        fprintf(g_trace, "cartucho_aplicado\t%u cadeias\n", patched);
+        fprintf(g_trace, "cartucho_aplicado\t%u cadeias; %u maiores preservadas\n",
+                patched, skipped_long);
         fflush(g_trace);
     }
 }
@@ -320,4 +359,19 @@ void legendas_capturar_rdram(uint8_t* rdram, const char* directory, unsigned id)
         }
     }
     fclose(out);
+
+    /* A traducao inglesa armazena os dialogos em um fluxo codificado. O TSV
+     * acima encontra apenas ASCII solto; a imagem completa permite localizar
+     * o bloco decodificado e seu consumidor exatamente no instante do F5. */
+    snprintf(path, sizeof(path), "%s\\legendas_rdram_f5_%03u.bin", directory, id);
+    out = fopen(path, "wb");
+    if (out) {
+        uint8_t block[4096];
+        for (uint32_t pos = 0; pos < RDRAM_DUMP_BYTES; pos += sizeof(block)) {
+            for (uint32_t i = 0; i < sizeof(block); i++)
+                block[i] = rd8(rdram, pos + i);
+            fwrite(block, sizeof(block), 1, out);
+        }
+        fclose(out);
+    }
 }

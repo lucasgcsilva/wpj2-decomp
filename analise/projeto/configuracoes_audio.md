@@ -137,7 +137,7 @@ A pasta `E:\projetos\project-wonder-j2-decomp\tools\` possui ferramentas dividid
 3. **`ORACULO_PROJECT64.bat`**: Define as variáveis de ambiente necessárias para gravar os manifestos e arquivos `.pcm` individuais.
 4. **`COMPARAR_AUDIO.bat`**: grava comparação em `temp/projeto/comparar_audio/`.
 5. **`TESTAR.bat`**: grava em `temp/projeto/testar/`.
-6. **`JOGAR.bat`**: Inicia o executável nativo diretamente com suporte a teclado.
+6. **`TESTAR.bat`**: Também é a entrada interativa principal, com suporte a teclado.
 
 ---
 
@@ -163,7 +163,7 @@ A pasta `E:\projetos\project-wonder-j2-decomp\tools\` possui ferramentas dividid
 > **ATENÇÃO LLM LOCAL:** Este é um **SEGUNDO PROBLEMA INDEPENDENTE** que deve ser analisado **somente após a conclusão da etapa de áudio**. Ele está registrado no arquivo `ENTRADA_RETOMADA.md`.
 
 #### Descrição do Problema de Controle
-- **O Sintoma:** Ao abrir o jogo nativo (`JOGAR.bat`), a tela de título é exibida, mas pressionar a tecla **START (Enter)** não faz o jogo avançar para o menu de seleção de save.
+- **O Sintoma:** Ao abrir o jogo nativo pelo perfil interativo do `TESTAR.bat`, a tela de título é exibida, mas pressionar a tecla **START (Enter)** não faz o jogo avançar para o menu de seleção de save.
 - **Investigação Realizada:**
   1. O teclado **funciona** na borda do runtime (`WndProc` em `runtime/video.c` captura os pressionamentos de tecla e salva na variável `g_buttons`).
   2. O PIF emulado (`runtime/pif.c`) responde corretamente ao formato Joybus (`0x1000` para START).

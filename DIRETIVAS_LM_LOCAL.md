@@ -50,6 +50,43 @@ temp/lm_local/AAAA-MM-DD_HHMM_nome_da_tarefa/
 └── comandos_executados.txt  # comandos de leitura/análise usados
 ```
 
+## 3.1 Tradução prioritária de recursos completos
+
+A fonte obrigatória para novas falas é
+`textos/recursos_completos_en.tsv`. Não traduzir novamente
+`dialogos_en_extraidos.*`: esses arquivos históricos dividem uma fala nos
+controles internos e não correspondem à chave usada pelo runtime.
+
+Procedimento permitido:
+
+1. selecionar linhas com `status=missing`;
+2. executar a tradução literal bruta como uma unidade, preservando `\\n`,
+   nomes e intenção; marcar a linha como `raw_lm`;
+3. revisar cada linha `raw_lm` isoladamente; não fornecer recursos vizinhos,
+   pois os modelos locais já demonstraram mistura de conteúdo entre índices;
+   marcar como `reviewed_lm`;
+4. usar `textos/recursos_completos_en.tsv` como checkpoint persistente e
+   `temp/lm_local/traducao_lm_status.json` como estado resumido descartável;
+5. somente quando não restar `missing` ou `raw_lm`, anexar as chaves completas
+   revisadas ao `traducao_ptbr.tsv`;
+6. auditar inglês residual, nomes, mojibake e expansão semântica suspeita; o
+   limite binário do runtime é relatório separado e não autoriza mutilar a
+   tradução para fazê-la caber;
+7. recursos dinâmicos descobertos depois entram incrementalmente e não
+   invalidam as traduções já concluídas.
+
+O comando canônico, retomável, é:
+
+```powershell
+python src/scripts/processar_recursos_completos_lm.py --stage all
+```
+
+O processo pode ser iniciado em segundo plano. Não iniciar uma segunda cópia
+enquanto `temp/lm_local/traducao_lm_status.json` estiver sendo atualizado.
+
+Colunas mínimas da proposta: `source_en`, `pt_br`, `encoded_bytes`,
+`max_encoded_bytes`, `status`, `notes`.
+
 O `RELATORIO.md` deve sempre usar este formato:
 
 ```markdown
@@ -213,10 +250,10 @@ A tradução canônica está em:
 textos/traducao_ptbr.tsv
 ```
 
-O catálogo gerado está em:
+O catálogo histórico gerado está em:
 
 ```text
-textos/dialogos_ptbr.json
+textos/legado/dialogos_ptbr.json
 ```
 
 ### A LM local não altera o TSV canônico
@@ -238,8 +275,9 @@ source_en<TAB>pt_br
 1. Preservar a cadeia inglesa exatamente, inclusive espaços finais.
 2. Uma entrada de origem corresponde a uma linha; não unir textos quebrados.
 3. Preservar placeholders e fragmentos como `-san`, nomes e pontuação útil.
-4. Nomes fixos: Josette, Corlo, Messala, Silconian, Siliconian, Magiteka,
-   Gijin, Proton, Seaba, Bird e J2.
+4. Traduzir `Silconian` como `Silconiano` e `Siliconian` como `Siliconiano`,
+   incluindo os plurais. Preservar os demais nomes: Josette, Corlo, Messala,
+   Magiteka, Gijin, Proton, Seaba, Bird e J2.
 5. Usar português brasileiro natural, curto e compatível com caixa de diálogo.
 6. Não inventar contexto que não está na frase.
 7. Quando a frase for fragmento, traduzir como fragmento para encaixar na
@@ -253,7 +291,7 @@ source_en<TAB>pt_br
 
 ```powershell
 & 'C:\Users\lucas\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -c `
-"import json; p=json.load(open(r'E:\projetos\project-wonder-j2-decomp\textos\dialogos_ptbr.json',encoding='utf8')); x=[e['source_en'] for e in p['entries'] if not e['pt_br']]; [print(repr(s)) for s in x[:50]]"
+"import json; p=json.load(open(r'E:\projetos\project-wonder-j2-decomp\textos\legado\dialogos_ptbr.json',encoding='utf8')); x=[e['source_en'] for e in p['entries'] if not e['pt_br']]; [print(repr(s)) for s in x[:50]]"
 ```
 
 Depois de preparar `proposta.tsv`, não executar merge automático. Informar ao

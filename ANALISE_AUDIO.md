@@ -152,7 +152,25 @@ outro endereço. Na rodada atual, 39 de 78 mudanças tinham essa assinatura.
 Isso é compatível com realocação de vozes pela ROM. Uma mudança entre listas
 não é, sozinha, evidência de corrupção.
 
-### 3.7 O problema não é simples saturação ou ganho mestre
+### 3.7 Ordem de conclusão do FIFO AI
+
+O perfil fiel ao driver do jogo revelou que o runtime postava `OS_EVENT_AI`
+antes de retirar o DMA concluído e promover o segundo slot. Como `post_event`
+pode acordar a thread imediatamente, ela observava `FIFO_FULL` antigo e a
+próxima chamada de `osAiSetNextBuffer` era rejeitada. A ordem foi corrigida
+para avançar o dispositivo primeiro e só então levantar a interrupção, como no
+hardware. O avanço agora também ocorre quando o evento AI está mascarado.
+
+No smoke test anterior à correção, 102 tarefas de áudio resultaram em apenas
+dois buffers AI (6.208 bytes). Depois da troca de ordem, as mesmas 102 tarefas
+produziram 93 buffers (272.064 bytes) e PCM não silencioso, com pico 19.790.
+Isso valida estruturalmente o perfil `audio_wonder`; a presença ou ausência do
+chiado ainda precisava de avaliação auditiva humana. O teste auditivo posterior
+indicou chiado mais forte que no perfil anterior. Portanto `audio_wonder` fica
+registrado como hipótese estrutural válida, porém rejeitada como solução sonora;
+ele não é mais o perfil padrão de `TESTAR.bat`.
+
+### 3.8 O problema não é simples saturação ou ganho mestre
 
 O WAV capturado já contém o defeito, porém não apresenta saturação suficiente
 para explicá-lo. Em passagens fortes, o RMS local fica próximo da referência.

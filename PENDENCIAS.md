@@ -59,3 +59,17 @@
   Project64 antes de substituir o caminho CPU estável.
 - **Cuidado:** não ativar um filtro global como atalho para anti-aliasing; o
   RDP depende de modos de ciclo e cobertura por material.
+
+# Legendas PT-BR — expansão de recursos maiores que o inglês
+
+- **Impacto:** alto para cobertura da tradução. O catálogo textual está
+  traduzido, mas 694 dos 2.137 recursos completos conhecidos excedem o espaço
+  binário da cadeia inglesa.
+- **Estado:** o interceptador `legendas_substituir_recurso` rejeita corretamente
+  esses casos com `recurso_ptbr_longo`, evitando sobrescrita da memória seguinte.
+- **Evidência local:** `textos/apoio/revisao_runtime_limites.tsv` registra fonte, tradução e
+  relação `bytes_pt>bytes_disponíveis` para cada caso.
+- **Próxima revisão:** redirecionar os dois ponteiros publicados por
+  `func_80096B38` para slots expansíveis com vida útil vinculada ao recurso,
+  preservando controles `E0/E1/E2` e digitação progressiva. Não encurtar
+  automaticamente as 694 traduções como substituto para a correção do runtime.

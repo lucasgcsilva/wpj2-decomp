@@ -238,7 +238,11 @@ static void pif_process(void) {
             if (rx >= 3) {
                 out[0] = 0x05;   /* tipo: controle padrao */
                 out[1] = 0x00;
-                out[2] = 0x02;   /* sem pak no slot       */
+                /* 0x02 e CONT_CARD_PULL (remocao recente), nao "sem pak".
+                 * Reporta zero para um controle conectado e sem acessorio;
+                 * assim a libultra nao reinicia a deteccao de PFS a cada
+                 * consulta de estado. */
+                out[2] = 0x00;
             }
         } else if (cmd == CMD_READ_BTN) {
             if (rx >= 4) {

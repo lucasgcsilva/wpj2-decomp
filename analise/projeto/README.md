@@ -7,6 +7,12 @@ Resultados produzidos pelo runtime deste projeto e já interpretados.
   existente no protótipo histórico.
 - `audio_primeira_divergencia.md`: resultado consolidado da sonda de
   continuidade dos estados e do PCM entre RSP e AI.
+- `integracao_legendas.md`: rota real do diálogo inglês descompactado e estado
+  da substituição PT-BR.
+- `referencia_wonder_llonsit.md`: avaliação da decompilação pública da ROM
+  japonesa e pontos reaproveitáveis por endereço.
+- `legendas/`: duas referências visuais usadas para localizar os buffers e o
+  controle de cor da primeira caixa de diálogo.
 
 Capturas WAV, PCM, PPM, logs de execução e métricas de uma nova rodada devem
 ser gravadas em `../../temp/projeto`, nunca aqui.

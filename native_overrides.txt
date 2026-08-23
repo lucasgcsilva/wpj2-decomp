@@ -22,7 +22,8 @@ func_800CCC60   # wrapper publico do heap: conserva o chamador do jogo para diag
 func_800CB840   # instrumenta a remocao da thread antes de ela tocar a fila
 func_80090784   # rasterizador de indices CI: wrapper diagnostico preserva o corpo recompilado
 func_80094230   # compositor de glifos/indices: registra o estado que escolhe a cor do atlas
-func_80090E58   # formatador ASCII; ponto opcional de legenda PT-BR
+func_80090E58   # fallback para textos estaticos que chegam direto ao formatador
+func_80096B38   # carregador de recurso textual; substitui a copia antes dos glifos
 func_800C4AA0   # osSendMesg: registra a postagem que deve acordar o carregamento inicial
 func_800045AC   # consulta de callback: registra os objetos ativos e o par init/update
 func_8000C584   # carregador da primeira cena: registra o indice procurado e se a tabela aceita a entrada
