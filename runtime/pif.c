@@ -251,8 +251,28 @@ void pif_update_stick_from_keys(int up, int down, int left, int right) {
     g_stick_y = sy;
 }
 
-/* Percorre a fita de comandos e preenche as respostas no lugar. */
-static void pif_process(void) {
+/* Percorre a fita de comandos e preenche as respostas no lugar.
+ *
+ * `refresh` distingue as duas origens, e a distincao importa:
+ *
+ *   refresh=0  execucao da fita, disparada por SI_PIF_ADDR_WR64B (dir=1).
+ *              O jogo acabou de montar comandos novos; todos valem.
+ *   refresh=1  releitura, disparada por SI_PIF_ADDR_RD64B (dir=0). Só o
+ *              estado dos controles e reamostrado.
+ *
+ * Por que reamostrar na leitura. A libultra escreve a fita uma unica vez e
+ * depois so le de volta (tools/libreultra/src/io/contreaddata.c); no hardware
+ * os botoes chegam novos porque o PIF varre os controles CONTINUAMENTE para a
+ * sua RAM, em segundo plano - nao porque a fita seja reexecutada. Reprocessar
+ * os comandos de controle no dir=0 e a forma mais simples de reproduzir essa
+ * varredura. Sem isso o controle congela: medido em 23/08, o jogo lia 30 vezes
+ * por segundo uma resposta de dois segundos atras.
+ *
+ * Por que armazenamento fica de fora. A varredura de fundo do PIF cobre botoes
+ * e analogico, jamais o Controller Pack: ler ou gravar 32 bytes so acontece
+ * quando o jogo pede. Tratar 0x02/0x03 no refresh executa cada transacao duas
+ * vezes - inofensivo no conteudo, caro no tempo. */
+static void pif_process(int refresh) {
     int i = 0, channel = 0;
 
     while (i < PIF_SIZE) {
@@ -310,6 +330,9 @@ static void pif_process(void) {
                 out[3] = (uint8_t)g_stick_y;
             }
         } else if (cmd == 0x02) { /* READ_PAK: Leitura de 32 bytes do MemPak */
+            /* Armazenamento nao entra no refresh - ver comentario de
+             * pif_process(). Reexecutar aqui so repetiria a mesma leitura. */
+            if (refresh) { i += 2 + tx + rx; channel++; continue; }
             if (tx >= 3 && rx >= 33) {
                 uint16_t addr = (uint16_t)((g_pif[i + 3] << 8) | g_pif[i + 4]);
                 uint8_t crc = 0;
@@ -317,6 +340,12 @@ static void pif_process(void) {
                 out[32] = crc;
             }
         } else if (cmd == 0x03) { /* WRITE_PAK: Escrita de 32 bytes no MemPak */
+            /* CRITICO: sem esta guarda a escrita acontece DUAS vezes por
+             * transacao, uma na execucao da fita e outra no refresh. O
+             * conteudo continua correto (mesmos 32 bytes no mesmo endereco),
+             * entao o defeito nao aparece como save corrompido - aparece como
+             * lentidao, que foi exatamente o sintoma relatado. */
+            if (refresh) { i += 2 + tx + rx; channel++; continue; }
             if (tx >= 35 && rx >= 1) {
                 uint16_t addr = (uint16_t)((g_pif[i + 3] << 8) | g_pif[i + 4]);
                 uint8_t in_crc = g_pif[i + 5 + 32];
@@ -364,33 +393,18 @@ void func_800CD4F0(uint8_t* rdram, recomp_context* ctx) {
     if (dir == 1) {
         /* RDRAM -> PIF: o jogo acabou de montar a fita de comandos. */
         copy_bswap(g_pif, rdram + dram, PIF_SIZE);
-        pif_process();
+        pif_process(0);
         g_si_writes++;
     } else {
         /* PIF -> RDRAM: devolve a fita ja com as respostas.
          *
-         * Reexecutar a fita AQUI nao e redundancia - e o comportamento do
-         * hardware, e sem isto o controle congela. A libultra escreve a fita
-         * uma unica vez; veja tools/libreultra/src/io/contreaddata.c:
-         *
-         *     if (__osContLastCmd != CONT_CMD_READ_BUTTON) {
-         *         __osPackReadData();
-         *         __osSiRawStartDma(OS_WRITE, &__osContPifRam);   // 1a vez so
-         *         osRecvMesg(mq, NULL, OS_MESG_BLOCK);
-         *     }
-         *     __osSiRawStartDma(OS_READ, &__osContPifRam);        // toda vez
-         *     __osContLastCmd = CONT_CMD_READ_BUTTON;
-         *
-         * A PIF RAM real retem a fita e o PIF a reexecuta a cada leitura, de
-         * modo que o OS_READ sozinho ja traz botoes novos. Processando so em
-         * dir=1, nos devolviamos para sempre o retrato tirado na ultima
-         * escrita. Medido antes da correcao, com relatorio de um em um
-         * segundo: si_w parou em 29 aos 2,0 s e nunca mais subiu, enquanto
-         * si_r seguiu em ~30/s ate 1176 aos 40 s - o jogo lia 30 vezes por
-         * segundo uma resposta de dois segundos atras. Era por isso que
-         * segurar START desde o boot "funcionava" (caia dentro da janela das
-         * 10 leituras iniciais) e apertar no titulo nunca funcionava. */
-        pif_process();
+         * O refresh antes da copia reamostra o estado dos controles, imitando
+         * a varredura de fundo do PIF. O porque, e por que armazenamento fica
+         * de fora, estao no comentario de pif_process(). Sem ele o controle
+         * congela: si_w parava em 29 aos 2,0 s enquanto si_r seguia a ~30/s,
+         * ou seja o jogo lia trinta vezes por segundo uma resposta de dois
+         * segundos atras. */
+        pif_process(1);
         copy_bswap(rdram + dram, g_pif, PIF_SIZE);
         g_si_reads++;
         /* Onde os botoes entram na memoria do jogo.
