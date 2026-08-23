@@ -1,5 +1,33 @@
 # Entrada de controle — estado da investigação
 
+> ## ✅ 22/08 — A CADEIA DE ENTRADA ESTÁ CORRETA
+>
+> Verificado de ponta a ponta com os símbolos da decompilação de referência
+> (`tools/wonder-source`), cujos endereços conferem com os nossos:
+>
+> ```
+> PIF entrega            0x1000  ✓
+> gContPad.button        0x1000  ✓   (osContGetReadData funciona)
+> gContPad.errno         0x00    ✓
+> gControllerRaw +0x04   0x1000  ✓   (botões mantidos)
+> gControllerRaw +0x0A   0x1000  ✓   (borda de pressionamento)
+> ```
+>
+> `Update_ControllerRaw` (`0x80098D24`) é chamada continuamente (600+ vezes
+> numa execução de 25 s) e propaga corretamente.
+>
+> **Nada abaixo desta linha sobre "a entrada não chega" continua válido.** O
+> defeito, se houver, está na lógica de estado do jogo que consome
+> `gControllerRaw` — não no transporte.
+>
+> Armadilha que custou vários ciclos: `gControllerRaw + 0` é **zerado de
+> propósito** a cada quadro (`sw $zero, 0x0($t9)` em `0x80098DFC`). A estrutura
+> tem 40 bytes por controle; observar só o offset 0 dá zero sempre e parece
+> defeito. Os botões ficam em `+0x04` e `+0x0A`; o analógico em `+0x10`/`+0x14`,
+> escalado por 80.0.
+>
+> Sonda: `src\scripts\sonda_input.cmd 25 0x1000`
+
 O START não responde. O objetivo da etapa era: título → START → menu "Start"
 → A → seleção de save. Não foi concluída.
 

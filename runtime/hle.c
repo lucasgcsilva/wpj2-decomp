@@ -1051,10 +1051,48 @@ void func_8009908C(uint8_t* rdram, recomp_context* ctx) {
     gate_path_mark("exit  9908C", rdram, ctx);
 }
 
+/* Update_ControllerRaw, nome vindo da decompilacao de referencia
+ * (tools/wonder-source). Ja esta medido que o PIF entrega 0x1000 e que o
+ * osContGetReadData preenche gContPad corretamente (0x80182558 = 0x1000), mas
+ * gControllerRaw (0x80180DA8) permanece zero. Esta funcao e quem deveria
+ * propagar um para o outro.
+ *
+ * O log registra as duas variaveis antes e depois, e o portao em 0x801824D4
+ * que decide se Thread_SendMesgNoBlock e chamado. Contador proprio: o
+ * gate_path_mark tem limite global de 48 compartilhado entre tres funcoes e
+ * se esgotava no boot. */
 void func_80098D24(uint8_t* rdram, recomp_context* ctx) {
-    gate_path_mark("enter 98D24", rdram, ctx);
+    static unsigned n;
+    uint16_t pad_antes = rdram16(rdram, 0x00182558u);
+    uint16_t raw_antes = rdram16(rdram, 0x00180DA8u);
+
     func_80098D24__replaced(rdram, ctx);
-    gate_path_mark("exit  98D24", rdram, ctx);
+
+    uint16_t pad_depois = rdram16(rdram, 0x00182558u);
+    uint16_t raw_depois = rdram16(rdram, 0x00180DA8u);
+    /* Sem filtro por valor: a versao anterior so imprimia quando pad ou raw
+     * eram nao-zero e nao imprimiu NADA, o que confunde "nunca chamada" com
+     * "chamada sempre com zero". As primeiras cinco mais uma a cada 300
+     * separam os dois casos e ainda mostram a frequencia. */
+    n++;
+    if (n <= 5u || (n % 300u) == 0u) {
+        /* O portao em 0x80098D84 (`lbu 0x255C($t0)`, passo 6) e
+         * gContPad[i].errno: se nao for zero o jogo pula o controle inteiro.
+         * MEDIDO: errno=00, portanto NAO e ele que bloqueia.
+         *
+         * gControllerRaw e um vetor de estruturas de 40 bytes (o codigo usa
+         * i*40). O offset 0 e zerado de proposito a cada quadro, e +0x10/+0x14
+         * recebem o analogico escalado por 80.0. Onde o BOTAO cai ainda nao
+         * foi identificado - despejar a estrutura inteira responde isso sem
+         * precisar ler mais assembly recompilado. */
+        printf("[ctrl-raw] #%u pad=%04X errno=%02X portao=%08X\n"
+               "           raw[40]:", n, pad_depois,
+               rdram[(0x0018255Cu) ^ 3u], rd32(rdram, 0x801824D4u));
+        for (uint32_t k = 0; k < 40u; k += 4)
+            printf(" %08X", rd32(rdram, 0x80180DA8u + k));
+        printf("\n");
+        fflush(stdout);
+    }
 }
 
 void func_80099450(uint8_t* rdram, recomp_context* ctx) {

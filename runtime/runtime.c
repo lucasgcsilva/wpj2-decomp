@@ -254,6 +254,18 @@ static const struct { uint32_t addr; const char* nome; int halfword; } k_watch[]
     { 0x800E8CF8u, "flag de entrada da fila inicial", 0 },
     { 0x800E8CFCu, "passo/velocidade da fila inicial", 0 },
     { 0x801A8D88u, "flags do roteiro", 1 },
+    /* Entrada de controle. Enderecos vindos da decompilacao de referencia
+     * (tools/wonder-source/libultra_symbols.txt e symbol_addrs.txt), que e do
+     * MESMO jogo e cujos enderecos conferem com os nossos.
+     *
+     * Ja esta medido que o PIF entrega 0x1000 em toda leitura. O que faltava
+     * era ver o outro lado: se o valor chega as variaveis que a logica do jogo
+     * consulta. O primeiro campo do OSContPad e `u16 button`, entao a leitura
+     * de meia-palavra pega os botoes direto: START aparece como 0x1000. */
+    { 0x80182558u, "gContPad.button", 1 },
+    { 0x80180DA8u, "gControllerRaw", 1 },
+    { 0x801AFB40u, "__osContPifRam (fita joybus)", 0 },
+
     { 0x801A7234u, "estado principal de func_80002F20", 1 },
     { 0x801A723Cu, "subestado principal de func_80002F20", 1 },
     { 0x801A7254u, "estado pendente de func_80002F20", 1 },

@@ -1,25 +1,38 @@
-Audio: reverte leitura de wet/dry com swap e revalida rampas em 32 bits
+Input: cadeia verificada correta usando os simbolos do wonder-source
 
-A leitura de wet/dry com swap ^2 zerava os dois ganhos mestres:
+O wonder-source e decompilacao do MESMO jogo e seus enderecos conferem com os
+nossos. Isso destravou a identificacao que estava parada ha varios ciclos:
 
-    [ganhos] swap: dry=0 wet=0 | cru: dry=26698 wet=18997
+    osContInit          = 0x800C51D0
+    osContStartReadData = 0x800C5590
+    osContGetReadData   = 0x800C5654
+    Update_ControllerRaw= 0x80098D24
+    gContPad            = 0x80182558
+    gControllerRaw      = 0x80180DA8
+    __osContPifRam      = 0x801AFB40   (o endereco que nosso PIF ja logava)
 
-Com os ganhos em zero, toda voz que retoma estado (flags=0x08) ficava muda e
-o sinal caia ~10x. A metrica de divergencia contra o microcodigo "melhorou"
-de 223 para ~45 listas por isso: saida quase silenciosa diverge pouco em
-valor absoluto. Era artefato, nao correcao.
+Medido de ponta a ponta com o botao preso:
 
-Descoberto porque o teste auditivo contradisse o numero. O erro de metodo foi
-medir divergencia sem medir nivel junto - uma metrica que premia silencio
-precisa de contrapeso.
+    PIF entrega            0x1000  ok
+    gContPad.button        0x1000  ok
+    gContPad.errno         0x00    ok
+    gControllerRaw +0x04   0x1000  ok  (mantido)
+    gControllerRaw +0x0A   0x1000  ok  (borda de pressionamento)
 
-Nesta reversao:
-  - wet/dry voltam a leitura crua (o comentario original do codigo, que eu
-    havia sobrescrito, estava certo);
-  - rampas em int32 REVALIDADAS sobre a base correta e mantidas: media 25,31%
-    contra 30,92% do int64, com RMS e DC iguais - ganho real, sem atenuacao;
-  - ANALISE_AUDIO.md ganha a secao 5k marcando 5c a 5j como contaminadas, e
-    avisos no topo para nao repetir o erro.
+A ENTRADA NAO ESTA QUEBRADA. Update_ControllerRaw roda 600+ vezes em 25 s e
+propaga corretamente, com deteccao de borda. O defeito restante esta na logica
+de estado do jogo, nao no transporte.
 
-Estado restaurado: 25,31% de media, 223 listas acima de 1%, DC +278,
-RMS 4915 - identico ao ponto de partida real.
+Armadilha registrada: gControllerRaw+0 e zerado de proposito a cada quadro
+(0x80098DFC). A estrutura tem 40 bytes por controle. Observar so o offset 0 da
+zero sempre e parece defeito - foi o que me levou a uma conclusao errada.
+
+Tambem cruzados os 47 nomes que tinhamos deduzido por engenharia reversa
+contra os 1148 da referencia: 30 confirmados, 16 divergentes. O
+libultra_names.txt precisa de revisao (os nomes errados sao so documentacao;
+o codigo, por exemplo func_800CF810, ja implementa a semantica certa).
+
+Novo TESTAR.bat, seguindo ESTRUTURA.md: perfis padrao/input/audio/sem_reverb/
+sem_polef/voz/legendas/audio_rsp/divergencia, saida sempre em
+temp\projeto\<perfil>, e resumo de audio automatico com DC e RMS - porque a
+metrica de divergencia premia silencio e nivel precisa entrar junto.
