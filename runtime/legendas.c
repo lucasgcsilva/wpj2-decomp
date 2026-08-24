@@ -225,9 +225,42 @@ int legendas_substituir_recurso(uint8_t* rdram, uint32_t pointer) {
     char translated[SCRATCH_SLOT_BYTES];
     size_t translated_n = make_ascii(translated, sizeof(translated), entry->translated);
     size_t encoded_n = translated_n + control_n * 2u;
-    if (!translated_n || encoded_n > raw_n) {
+
+    /* Capacidade real, nao comprimento da cadeia inglesa.
+     *
+     * O limite antigo era `encoded_n > raw_n`, que trata o tamanho do texto
+     * original como se fosse o tamanho do bloco. Nao e: o recurso quase sempre
+     * termina com enchimento de zeros ate o alinhamento, e esses bytes estao
+     * livres. Medir a folga em vez de presumi-la nao arrisca nada - so usamos
+     * bytes que ja lemos como zero - e recupera traducoes que hoje ficam em
+     * ingles nos DOIS caminhos.
+     *
+     * Vale insistir nisso porque a documentacao do projeto afirmava o
+     * contrario. O comentario do patcher de cartucho diz que uma cadeia maior
+     * "sera expandida no interceptador dinamico", mas o interceptador aplicava
+     * exatamente a mesma restricao; na pratica nenhuma delas era traduzida em
+     * lugar nenhum. textos/LEIA-ME.md contabiliza 694 recusadas por este
+     * limite.
+     *
+     * A folga inclui o proprio terminador. Precisamos gravar caracteres em
+     * 0..encoded_n-1 e o NUL em encoded_n, logo a condicao e
+     * encoded_n <= raw_n + folga - 1. O teto evita que uma regiao grande de
+     * zeros - que pode ser outra coisa, e nao enchimento - seja invadida. */
+    #define FOLGA_MAX 96u
+    size_t folga = 0;
+    while (folga < FOLGA_MAX && phys + raw_n + folga < RDRAM_LIMIT &&
+           rd8(rdram, phys + (uint32_t)(raw_n + folga)) == 0)
+        folga++;
+    size_t capacidade = folga ? raw_n + folga - 1u : raw_n;
+
+    if (!translated_n || encoded_n > capacidade) {
         trace_source("recurso_ptbr_longo", source);
         return 0;
+    }
+    if (encoded_n > raw_n) {
+        /* Marcado a parte para dar para medir o ganho no legendas_rota.tsv:
+         * estas so cabem por causa do enchimento. */
+        trace_source("recurso_ptbr_folga", source);
     }
 
     const char* source_colon = strchr(source, ':');
@@ -265,7 +298,15 @@ int legendas_substituir_recurso(uint8_t* rdram, uint32_t pointer) {
         if (pos < translated_n)
             wr8(rdram, phys + (uint32_t)out++, (uint8_t)translated[pos]);
     }
-    while (out <= raw_n)
+    /* Ate o MAIOR entre os dois, nao ate raw_n.
+     *
+     * Com raw_n sozinho, uma cadeia que usa a folga sai sem terminador: `out`
+     * ja passou de raw_n quando o laco comeca e ele nao executa nenhuma vez.
+     * O texto vazaria para o que viesse depois. Pelo maior, escreve-se o NUL
+     * em `out` e, quando a traducao e mais curta, ainda se limpa o resto do
+     * ingles original - que era o proposito inicial deste laco. */
+    size_t limite_zeros = encoded_n > raw_n ? encoded_n : raw_n;
+    while (out <= limite_zeros)
         wr8(rdram, phys + (uint32_t)out++, 0);
     trace_source("recurso_ptbr_nativo", source);
     return 1;
@@ -309,19 +350,41 @@ void legendas_aplicar_cartucho(uint8_t* cart, size_t rom_size) {
             char fixed[MAX_TEXT + 1];
             char translated[MAX_TEXT + 1];
             size_t translated_len = make_ascii(translated, sizeof(translated), entry->translated);
-            /* Uma cadeia maior sobrescreveria o recurso seguinte. Ela permanece
-             * inglesa no cartucho e sera expandida no interceptador dinamico. */
-            if (translated_len > length) {
+            /* Mede a folga em vez de presumir que o bloco tem o tamanho do
+             * texto ingles - mesma correcao aplicada ao interceptador
+             * dinamico, e pelo mesmo motivo.
+             *
+             * O comentario que estava aqui dizia que uma cadeia maior "sera
+             * expandida no interceptador dinamico". Nao era verdade: o
+             * interceptador tinha a mesma restricao, entao nenhum dos dois
+             * caminhos traduzia essas cadeias. textos/LEIA-ME.md registra 694
+             * recusadas por este limite.
+             *
+             * So se escreve sobre bytes lidos como zero, portanto o recurso
+             * seguinte continua intocado. Precisamos de posicoes
+             * 0..translated_len-1 mais o NUL, logo comparamos contra
+             * length + folga - 1. */
+            size_t folga = 0;
+            while (folga < FOLGA_MAX && pos + length + folga < rom_size &&
+                   cart[(pos + length + folga) ^ 3u] == 0)
+                folga++;
+            size_t capacidade = folga ? length + folga - 1u : length;
+            if (translated_len > capacidade) {
                 skipped_long++;
                 continue;
             }
-            make_fixed_ascii(fixed, length, entry->translated);
-            for (i = 0; i < length; i++) cart[(pos + i) ^ 3u] = (uint8_t)fixed[i];
+            /* make_fixed_ascii preenche exatamente `destino` bytes com o texto
+             * e completa com zeros, entao passar a capacidade usada mantem o
+             * terminador dentro da folga medida. */
+            size_t destino = translated_len > length ? translated_len : length;
+            make_fixed_ascii(fixed, destino, entry->translated);
+            for (i = 0; i < destino; i++) cart[(pos + i) ^ 3u] = (uint8_t)fixed[i];
+            if (destino > length) cart[(pos + destino) ^ 3u] = 0;
             patched++;
         }
     }
     if (g_trace && g_trace_lines++ < 2048u) {
-        fprintf(g_trace, "cartucho_aplicado\t%u cadeias; %u maiores preservadas\n",
+        fprintf(g_trace, "cartucho_aplicado\t%u cadeias; %u nao cabem nem com folga\n",
                 patched, skipped_long);
         fflush(g_trace);
     }

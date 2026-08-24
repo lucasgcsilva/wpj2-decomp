@@ -493,8 +493,16 @@ int video_init(void) {
     g_video_quit = 0;
     g_hold_last_nonblack = getenv("WPJ2_WINDOW_HOLD_LAST") != NULL &&
                            atoi(getenv("WPJ2_WINDOW_HOLD_LAST")) != 0;
-    g_present_smooth = getenv("WPJ2_PRESENT_SMOOTH") != NULL &&
-                       atoi(getenv("WPJ2_PRESENT_SMOOTH")) != 0;
+    /* Ligado por padrao. Estava desligado, ou seja, ampliavamos 320x240 ate o
+     * tamanho da janela repetindo pixel - o que cria escada mesmo em imagem
+     * que nao tem serrilhado nenhum na origem. Parte do "serrilhado" relatado
+     * nasce aqui, e nao na rasterizacao. WPJ2_PRESENT_SMOOTH=0 volta ao
+     * vizinho-mais-proximo, que continua sendo o modo certo para comparar
+     * pixel a pixel com o oraculo. */
+    {
+        const char* e = getenv("WPJ2_PRESENT_SMOOTH");
+        g_present_smooth = !e || atoi(e) != 0;
+    }
     printf("[video] janela aberta: %s (320x240 ampliado)\n", titulo);
     fflush(stdout);
     return 1;
@@ -558,12 +566,27 @@ void video_present(uint8_t* rdram, uint32_t origin, uint32_t width,
             g_pixels[y * VIDEO_W + x] = (r << 16) | (g << 8) | b;
         }
     }
-    /* A abertura 8/* e um mosaico de 30 TEXRECT, mas a lista tambem contem
-     * triangulos auxiliares; classifica-la pelo ultimo opcode fazia o filtro
-     * ser indevidamente pulado. O estado da propria ROM separa a abertura 2D
-     * da cena do corredor (12/50) sem tocar no renderizador 3D. */
-    int16_t estado_jogo = *(int16_t*)(rdram + (0x001A7234u ^ 2u));
-    if (video_vi_filter_2d_ativo() && estado_jogo == 8)
+    /* Acionado pelo bit que o proprio jogo liga, nao por heuristica de cena.
+     *
+     * Antes isto era `estado_jogo == 8`, escolhido porque a abertura era onde
+     * a granulacao incomodava. Mas o jogo declara a intencao explicitamente em
+     * tools/wonder-source/src/main.c:
+     *
+     *     osViSetSpecialFeatures(OS_VI_DITHER_FILTER_ON |
+     *                            OS_VI_GAMMA_DITHER_OFF | OS_VI_GAMMA_OFF);
+     *
+     * e o VI_CONTROL lido em execucao (0x13002) confirma: bit 16 ligado. Vale
+     * para o jogo inteiro, nao so para a abertura.
+     *
+     * ATENCAO ao numero do bit. DITHER_FILTER_ENABLE e 0x10000 (bit 16); os
+     * bits 12-15 sao PIXEL_ADVANCE, que em 0x13002 valem 3. Ja errei isto uma
+     * vez lendo o bit 11.
+     *
+     * Isto ataca granulacao de dither. NAO ataca o serrilhado - o anti-alias
+     * do N64 depende de coverage produzido na rasterizacao, que ainda nao
+     * existe; ver RETOMADA.md. */
+    #define VI_CTRL_DITHER_FILTER 0x10000u
+    if (video_vi_filter_2d_ativo() && (vi_status & VI_CTRL_DITHER_FILTER))
         video_filtrar_vi_2d(height);
     g_last_rdram = rdram;
     g_last_origin = origin;

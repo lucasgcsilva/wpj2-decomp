@@ -1453,7 +1453,44 @@ int hle_deliver_events(uint8_t* rdram) {
     double restante_ticks = g_poll_deadline - (double)now.QuadPart;
     /* SP/DP nao esperam o proximo retrace; vide deliver_rsp_task_done acima. */
     int rsp_woke = deliver_rsp_task_done(rdram);
+    /* SI tambem nao espera, e pelo mesmo motivo.
+     *
+     * Ate aqui a drenagem do SI ficava DEPOIS do portao de 60 Hz, o que
+     * pautava o barramento serial na taxa de video. No hardware a conclusao do
+     * SI sai em microssegundos; o portao existe para manter a taxa de quadros
+     * honesta, nao para atrasar transferencia.
+     *
+     * O custo era grande e ficou visivel no Controller Pack. A fila de
+     * mensagens do SI deste jogo tem capacidade 1 - observada no despejo de
+     * threads como `fila=800F96D8 ... valid=0/1` - entao o laco de oito so
+     * conseguia entregar UMA conclusao por retrace, ou 60 por segundo. Cada
+     * bloco de 32 bytes do Controller Pack consome duas (escrita da fita e
+     * leitura de volta), o que da 30 blocos por segundo; uma imagem de 32 KB
+     * sao 1024 blocos, isto e mais de trinta segundos so de espera de portao.
+     *
+     * Entregar aqui nao inventa conclusao nenhuma: cada evento continua
+     * correspondendo a uma transferencia real ja concluida, e o post_event que
+     * falha por fila cheia interrompe o laco sem consumir a pendencia. */
+    int si_woke = 0;
+    if (EVENT_ON(OS_EVENT_SI)) {
+        for (int n = 0; n < 8 && pif_si_done_pending(); n++) {
+            if (!post_event(rdram, OS_EVENT_SI)) break;
+            pif_take_si_done();
+            si_woke = 1;
+        }
+    }
+    rsp_woke |= si_woke;
     if (restante_ticks > 0.0) {
+        /* Acordou alguem? Volta agora, sem dormir.
+         *
+         * Dormir aqui depois de ter entregue uma conclusao anula o ganho: a
+         * thread que acabou de ficar pronta so rodaria no fim do sono, e a
+         * cadencia efetiva voltaria a ser a do retrace. Isso importa
+         * especialmente para o SI, em que a fila do jogo comporta uma unica
+         * mensagem e a proxima transferencia so pode comecar depois que esta
+         * for consumida. O prazo absoluto continua intacto - nada aqui adianta
+         * o relogio de quadros. */
+        if (rsp_woke) return rsp_woke;
         /* A resolucao foi fixada em 1 ms no inicio. Dormir apenas o inteiro
          * estritamente anterior ao prazo evita uma espera extra de 15,6 ms e
          * deixa o ultimo milissegundo para o proximo poll cooperativo. */
@@ -1510,12 +1547,10 @@ int hle_deliver_events(uint8_t* rdram) {
     /* Antes da entrega, e nao depois: assim o relatorio mostra o estado que o
        laco abaixo vai encontrar, incluindo o acumulo de pendentes. */
     pif_relatorio_periodico();
-    if (EVENT_ON(OS_EVENT_SI)) {
-        for (int n = 0; n < 8 && pif_si_done_pending(); n++) {
-            if (!post_event(rdram, OS_EVENT_SI)) break;
-            pif_take_si_done();
-        }
-    }
+    /* A drenagem do SI subiu para antes do portao de 60 Hz, junto de SP/DP.
+       O motivo esta la em cima; em resumo, pautar o barramento serial na taxa
+       de video custava mais de trinta segundos numa leitura de Controller
+       Pack. Nada a fazer aqui. */
     /* A conclusao AI e determinada pela duracao PCM do DMA primario, e nao
        por um retrace arbitrario. Isso reproduz BUSY/FIFO do hardware e evita
        que a thread de audio avance quase duas vezes cedo demais. */

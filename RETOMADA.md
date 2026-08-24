@@ -45,6 +45,20 @@ seja reexecutada; essa varredura nunca toca o Controller Pack.
 
 *Falta validar com o jogo rodando: confirmar que salvar ficou mais rápido.*
 
+## Aplicado na segunda passagem (23/08, tarde)
+
+- **SI fora do portão de 60 Hz** (`runtime/hle.c`). Ver item 6 abaixo. Medido:
+  leituras de controle em 40 s **1114 → 2252**, `si_r` **1134 → 3190**,
+  pendências constantes em zero. É a correção mais importante do dia depois da
+  escrita dupla.
+- **Folga de texto medida** (`runtime/legendas.c`). Ver item 3. Ganho real
+  pequeno (8740 → 8759); o restante é conteúdo, não código.
+- **Filtro de dither pelo bit real e ampliação suavizada** (`runtime/video.c`).
+  Ver item 2.
+
+Nada disto foi validado com o jogo na mão — falta confirmar que salvar ficou
+mais rápido e que as legendas resgatadas aparecem certas.
+
 ---
 
 # Revisão dos projetos de referência — achados
@@ -106,27 +120,60 @@ chamada.
 - **Gamma: já está correto.** `video_gamma_ativo()` condiciona ao bit 3 do
   `vi_status`; o jogo desliga o gamma, o bit fica zero, a curva não é
   aplicada. Verificado, sem ação necessária.
-- **Filtro de dither: acionado pelo critério errado.** Hoje
-  `video_filtrar_vi_2d` roda sob `video_vi_filter_2d_ativo() && estado_jogo == 8`.
-  O gatilho correto é o bit 11 (`dither_filter_enable`) do `vi_status`, que é
-  o que o jogo efetivamente pede. Trocar o `estado_jogo == 8` — que é uma
-  heurística — pelo bit remove um caso especial e aplica o filtro onde o jogo
-  quer. Isso ataca granulação de dither, **não** o serrilhado (ver item 1).
+- **Filtro de dither: acionado pelo critério errado.** ✅ *corrigido.* Rodava
+  sob `estado_jogo == 8`, uma heurística. Passa a seguir o bit que o jogo liga:
+  `DITHER_FILTER_ENABLE`, **bit 16** (`0x10000`). Atenção — não é o bit 11; os
+  bits 12–15 são `PIXEL_ADVANCE`, que em `0x13002` valem 3. Errei isto na
+  primeira redação deste documento. Ataca granulação de dither, **não** o
+  serrilhado (ver item 1).
+- **Ampliação sem filtro.** ✅ *corrigido.* `g_present_smooth` estava desligado
+  por padrão, então 320×240 era ampliado até o tamanho da janela repetindo
+  pixel — o que cria escada mesmo numa imagem sem serrilhado na origem. Parte
+  do serrilhado percebido nascia aqui, e não na rasterização.
+  `WPJ2_PRESENT_SMOOTH=0` volta ao vizinho-mais-próximo, que continua sendo o
+  modo certo para comparar pixel a pixel com o oráculo.
 
-## 3. Legendas faltando: medir antes de mexer
+Decodificação completa do `VI_CONTROL` observado (`0x13002`), útil como
+referência: type=2 (16 bits), gamma_dither=0, gamma=0, divot=0, serrate=0,
+**aa_mode=0** (AA completo), pixel_advance=3, **dither_filter=1**. Bate campo a
+campo com o `osViSetSpecialFeatures` do fonte.
 
-Sintoma: há texto no TSV que não aparece traduzido em jogo.
+## 3. Legendas faltando: é limite de espaço, não bug de código
 
-Existem dois caminhos de texto já instrumentados — o carregador de recurso
-(`func_80096B38`) e o formatador de texto estático (`func_80090E58`). A
-hipótese mais provável é que um dos dois não passe pela substituição, ou que a
-chave usada na busca não seja a mesma gravada no TSV.
+**Resolvido o diagnóstico.** Os dois caminhos recusavam qualquer tradução mais
+longa que o texto inglês:
 
-Método concreto, sem chutar: `TESTAR.bat` já grava `legendas_rota.tsv` com as
-chaves pedidas em execução. Comparar esse arquivo com `textos/traducao_ptbr.tsv`
-separa as três causas possíveis de uma vez — chave pedida e ausente do TSV,
-chave presente nos dois mas não aplicada, ou chave nunca pedida (caminho de
-texto não interceptado).
+```c
+/* patch de cartucho */          if (translated_len > length) { skipped_long++; continue; }
+/* interceptador dinâmico */     if (!translated_n || encoded_n > raw_n) { ... return 0; }
+```
+
+O comentário do patcher dizia que uma cadeia maior "será expandida no
+interceptador dinâmico" — **não era verdade**, o interceptador aplicava a mesma
+restrição. Nenhuma delas era traduzida em lugar nenhum. `textos/LEIA-ME.md`
+já contabilizava 694 recusadas.
+
+✅ *Corrigido em parte.* Os dois caminhos agora **medem a folga de enchimento**
+em vez de tratar o comprimento do texto como capacidade do bloco, e só
+escrevem sobre bytes lidos como zero. Também foi corrigido o laço de
+terminação, que deixaria uma cadeia sem `NUL` ao usar a folga.
+
+**Mas o ganho é pequeno: 8740 → 8759 cadeias.** Os recursos do cartucho são
+densamente empacotados, quase sem enchimento. Isso é informação valiosa: o
+inglês já foi espremido no espaço do japonês, e o português é tipicamente ~20%
+mais longo.
+
+**Encaminhamento — e não é código.** As ~2170 restantes precisam de traduções
+mais curtas. `textos/apoio/revisao_runtime_limites.tsv` já lista exatamente
+quais não cabem; alimentar essa lista de volta no pipeline de LM, pedindo
+variantes dentro do limite de bytes de cada uma, é o caminho. A alternativa de
+engenharia seria relocar as cadeias e corrigir os ponteiros, mas o patch atual
+localiza texto por varredura de conteúdo, não por tabela de ponteiros — seria
+um projeto à parte.
+
+Diagnóstico contínuo: `src/scripts/resumo_legendas.py <legendas_rota.tsv>`
+conta as rotas. `recurso_ptbr_folga` marca as resgatadas pela folga e
+`recurso_ptbr_longo` as que ainda não cabem.
 
 ## 4. `tools/sdk-tools` — ainda não explorado
 
@@ -141,3 +188,45 @@ Sem achado novo nesta revisão. Depende de comparar a emissão de
 `SETTILE`/`SETTILESIZE` e o cálculo de coordenadas contra a referência. Fica
 depois do item 1, porque implementar blend altera o caminho de textura e
 tornaria qualquer medição feita agora obsoleta.
+
+## 6. Controller Pack lento: o SI estava pautado na taxa de vídeo ✅ corrigido
+
+Segunda causa, independente da escrita dupla, e maior que ela.
+
+Em `hle_deliver_events` (`runtime/hle.c`) há um portão de 60 Hz. SP e DP já
+eram entregues **antes** dele, com o comentário `"SP/DP nao esperam o proximo
+retrace"`. A drenagem do SI, porém, ficava **depois** — pautando o barramento
+serial na taxa de vídeo. No hardware a conclusão do SI sai em microssegundos;
+o portão existe para manter a taxa de quadros honesta, não para atrasar
+transferência.
+
+A aritmética do custo:
+
+- a fila de mensagens do SI deste jogo comporta **uma** mensagem — vista no
+  despejo de threads como `fila=800F96D8 ... valid=0/1`
+- logo o laço de oito entregava de fato **uma conclusão por retrace**, 60/s
+- cada bloco de 32 bytes do Controller Pack consome duas (escrita da fita e
+  leitura de volta) → 30 blocos/s
+- uma imagem de 32 KB são 1024 blocos → **mais de trinta segundos só de espera
+  de portão**
+
+Correção: a entrega subiu para antes do portão, e o caminho de sono passa a
+retornar cedo quando alguma thread foi acordada — sem isso o `Sleep` anularia
+o ganho, porque a thread pronta só rodaria no fim dele.
+
+Medido em 40 s, perfil `input_tardio`:
+
+| | antes | depois |
+|---|---|---|
+| leituras de controle | 1114 | **2252** |
+| `si_r` | 1134 | **3190** |
+| `pendentes` | oscila 0–1 | **0 sempre** |
+
+Evidência direta da rajada: na transição de cena entre 22 s e 24 s o `si_w`
+salta de 206 para 952 — 746 escritas em ~2 s, cerca de 373/s, contra o teto
+antigo de 60/s. Entrada preservada: `pad=1000` e estado final `11/24`, iguais.
+
+**Lição de método, que vale para o resto do projeto:** o portão de 60 Hz é
+correto para o *vídeo* e errado para todo o resto. Vale auditar se algum outro
+evento ainda está sendo entregue depois dele sem precisar — AI já tem
+tratamento próprio, mas PI não foi verificado.
