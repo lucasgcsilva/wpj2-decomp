@@ -826,3 +826,182 @@ centrados. `í` substitui o ponto por uma pequena diagonal, e `º`/`ª` passaram
 a ser gravados junto das demais compostas.
 
 Relatório consolidado: `analise/projeto/acentuacao_ptbr.md`.
+
+---
+
+# 15. Sessão de 24/08 (tarde) — acentuação, desempenho e o mapa da tradução
+
+**Nada commitado a partir daqui** (trabalho em co-work com o Codex; commit sob
+pedido).
+
+## Acentuação PT-BR — resolvida e publicada (`0200360`)
+
+A correção veio do Codex a partir da análise acumulada aqui, e foi verificada
+de forma independente: build limpo, `test_legendas_recursos` OK, e a captura
+do menu mostra **"Ok, vamos lá!"** contra o controle em inglês.
+
+Dois erros meus que ela corrigiu, e vale registrar:
+
+- os `obj=0x22A`, `0x140` que eu **descartei** eram os índices de glifo reais.
+  Descartei-os por causa do `if (arg0 < 0xFF)` do wonder-source — que é o ramo
+  da ROM **japonesa**. O patch Ryu converte ASCII → EUC-JP → Shift-JIS →
+  índice truncado em dez bits;
+- a célula é de **24 bytes**, não 32. Eu inferi `0x20` do espaçamento `L`/`M`/`N`
+  numa tabela dormente.
+
+O caminho vivo é `D_8015F880 + indice*24 + linha*2 - 0x1200`, recomposto
+imediatamente antes de `func_80094230` consumir o objeto.
+
+## Desempenho — regressão desfeita, e o jogo ficou mais rápido que antes
+
+A lentidão de cursor **não vinha da acentuação**: vinha da instrumentação que
+eu deixei para trás na caça à fonte.
+
+`func_80090784` desenha **um pixel** e roda milhões de vezes — 2,8 M em 40 s
+pelo próprio histograma. Havia ali um cerco de marca e um histograma de
+chamadores, ambos chamando `getenv()` por chamada. Removidos.
+
+Também: chaves de ambiente em caminho quente passaram a `static` lido uma vez
+(`func_80090E58` fazia dois `getenv` por letra), e a rede de segurança que
+varria **8 MB de RDRAM por quadro** durante troca de cena foi espaçada.
+
+**Medido: 2252 → 3345 leituras em 40 s, +48%.** Acima do que era antes de todo
+o trabalho de acentuação.
+
+## O mapa da tradução — o achado estrutural desta sessão
+
+Parei de tratar frase por frase e medi o catálogo inteiro contra o orçamento
+real da ROM (`src/scripts/auditar_orcamento.py`, mesmo critério do runtime).
+
+| classe | quantidade | natureza |
+|---|---|---|
+| cabem e são aplicadas | **1977** | funcionando |
+| na ROM, tradução longa demais | **1687** | conteúdo — encurtar |
+| **não estão na ROM em texto plano** | **2063** | comprimidas — outro caminho |
+
+**46% de recusa** entre as localizadas. É isto que explica "palavras em inglês
+espalhadas pela interface", e é por isso que caçar frase a frase não terminaria
+nunca.
+
+A lista completa das 1687, com limite e tamanho atual de cada uma, ordenada por
+quanto falta, está em `textos/apoio/revisao_runtime_limites.tsv` — consumível
+direto pelo pipeline de LM. **Quase todas as piores faltam por 1 byte.**
+
+### Por que o orçamento é apertado
+
+As opções de menu vivem num bloco contíguo separado por `\n`, **sem enchimento
+de zeros**. O limite é o tamanho exato do original:
+
+```
+0x68B8E8  "Start\n"  "Delete Diary\n"  "Copy Diary\n"
+0x68B90C  "Start without saving\n"
+```
+
+Corrigidas para caber: `Jogar` (5), `Apagar` (6), `Copiar` (6). A escolha de
+palavra é revisável; o limite não.
+
+### Guarda de terminador no patcher
+
+O patcher trocava a cadeia em qualquer posição onde os bytes batessem, mesmo
+sendo **prefixo** de outra. Agora só troca quando o byte seguinte não é ASCII
+imprimível.
+
+Medido o efeito: o total caiu de 8759 para 8390 aplicadas, mas **apenas 20
+entradas** perdem todas as ocorrências — e são justamente as que corrompiam:
+
+```
+'Yes.'  ->  "Yes... forever"
+'Yup!'  ->  "Yup! I too will join"
+'Day'   ->  "Days..."
+```
+
+Os 369 patches a menos eram escritas erradas evitadas.
+
+A regra é por exclusão (rejeita só ASCII imprimível) em vez de lista de
+terminadores aceitos, porque o texto embute controles `E0/E1/E2` e uma fala
+pode terminar num deles.
+
+## Classe 3 — o que falta investigar
+
+`Progress`, `Day` e os rótulos da tela de saves **não existem em texto plano na
+ROM**. Estão comprimidos, como a fonte.
+
+O caminho de runtime (`legendas_substituir_recurso`) age depois da
+descompressão e seria a rota natural — mas o log mostra que ele mal dispara:
+**duas substituições na execução inteira**. Ou essas telas não passam por ele,
+ou passam por um caminho que não interceptamos.
+
+Próximo passo: instrumentar quem carrega os textos da tela de saves e ver se
+há um ponto equivalente ao `Spi_DecompressAsset` da fonte, onde a cadeia exista
+descomprimida antes de ser consumida.
+
+## Ferramentas novas
+
+- `src/scripts/auditar_orcamento.py` — audita o catálogo inteiro contra a ROM
+- `src/scripts/orcamento_texto.py` — orçamento de uma cadeia específica
+- `src/scripts/recortar_glifo.py` — transcreve um glifo do framebuffer
+- `src/scripts/comparar_quadros.py` — dois quadros lado a lado
+
+## Pendente
+
+Item das transições com falhas após o start — não atacado.
+
+## Atualização Codex — 24/08/2026: causa comum do realce e das faixas
+
+O trace completo do menu `11/24`, cruzado com `wonder-source` e os macros RDP
+de `libreultra`, encontrou o quad que faltava. O realce não é `FILLRECT` nem
+`TEXRECT`: a ROM emite `VTX` + dois `TRI1`, desliga `G_TEXTURE`, usa
+`G_CC_SHADE`, render mode `0x00504A50` e alfa nos vértices.
+
+O rasterizador respeitava `G_TEXTURE_OFF` somente no 3D `12/50`; no 2D ele
+amostrava o tile anterior. A correção global em `runtime/rsp.c` recuperou, em
+replay determinístico:
+
+- retângulo vermelho piscante sobre a opção do menu;
+- retângulo cobrindo a ficha rosa inteira na seleção de diário;
+- cursor sem disputar/duplicar os pixels do realce;
+- transição 2D em sequência limpa: escurecimento, preto, menu escuro, menu.
+
+A tentativa anterior de traduzir `Day`/`Progress` editando o framebuffer foi
+removida. Com PT-BR ligado, `Jogar`/`Apagar`/`Copiar` aparecem pelo caminho
+nativo; `Day`/`Progress` continuam ingleses porque já chegam rasterizados na
+imagem CI8 dinâmica (`timg` por volta de `0x80358F50`). Esse é o próximo alvo
+de tradução, no escritor/recurso da imagem, não numa camada sobreposta.
+
+## Atualização Codex — 25/08/2026: estado gráfico entre tarefas
+
+O relato de que a tela congelava enquanto a música continuava separou o defeito
+de um deadlock. `G_TEXTURE_OFF`, necessário para o realce vermelho, estava
+vazando para a `OSTask` gráfica seguinte. Lotes 2D que não repetiam
+`gSPTexture(G_ON)` deixavam de atualizar a imagem, embora jogo, VI e áudio
+seguissem executando.
+
+`runtime/rsp.c` agora reinicia apenas o marcador de definição no começo de cada
+tarefa: depois de um comando `TEXTURE`, seu ON/OFF é respeitado dentro daquela
+tarefa; antes dele, o 2D conserva o estado inicial texturizado. O replay completo
+mantém menu, realce e transições. A afirmação anterior de que isto também
+resolvera o congelamento após `End` foi retirada: a reprodução usada terminava
+antes do ponto real, que ocorre 5–6 segundos depois da confirmação.
+
+Em paralelo, o CRC dos 32 bytes do Controller Pak foi alinhado ao
+`__osContDataCrc` de `libreultra`, `wonder-source` e Project64, incluindo os oito
+bits zero finais. É uma correção válida do PFS, mas não era a causa deste
+congelamento visual.
+
+## Atualização Codex — 25/08/2026: congelamento tardio após `End`
+
+O teste longo confirmou congelamento da thread principal, não só da imagem:
+gráficos e PIF paravam enquanto o áudio continuava, e a execução girava em
+`func_8008ED4C`/`vsprintf`. Desligar PT-BR eliminava o defeito; manter o catálogo
+e desligar apenas o patch estático do cartucho também.
+
+A bisseção identificou exatamente `It's morning...` → `É de manhã...`, em
+`0x008006DC`. O glifo interno de `ã` é o byte `%`; antes de o texto chegar ao
+renderer ele ainda passa por formatação, portanto o byte era consumido como
+especificador e corrompia a cadeia de argumentos. `runtime/legendas.c` agora
+recusa no patch estático traduções com essa colisão e as deixa para a tradução
+do recurso vivo, posterior ao `sprintf`.
+
+No replay completo com PT-BR, a contagem voltou a 4.702 tarefas gráficas em 18
+segundos e a thread principal terminou aguardando em `0x800CC98C`, em vez de
+presa no formatador.

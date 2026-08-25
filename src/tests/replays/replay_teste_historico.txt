@@ -1,0 +1,3 @@
+# reproducao de teste: START logo depois do titulo
+alvo=1300
+roteiro=0:0000;1170:1000;1230:0000

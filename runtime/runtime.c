@@ -51,7 +51,10 @@ static size_t g_rom_size = 0;
 static volatile LONG g_reported = 0;
 static double g_timeout_s = 20.0;
 static unsigned g_frame_samples = 4;    /* quadros periodicos do watchdog */
-static const char* g_out_prefix = "";     /* separa saidas de corridas paralelas */
+/* Mesmo uma execucao diagnostica iniciada diretamente deve respeitar a
+ * estrutura do projeto. TESTAR.bat substitui este prefixo pelo perfil ativo;
+ * sem ele, nunca espalhar capturas e logs pela raiz. */
+static const char* g_out_prefix = "temp/projeto/direto/";
 static int g_video_preview = 0;
 #ifdef WPJ2_RELEASE
 static int g_diagnostics = 0;
@@ -122,6 +125,7 @@ static size_t g_trace_distinct = 0;
 #define TRACE_ORDER_MAX 64
 static uint32_t g_trace_order[TRACE_ORDER_MAX];
 static uint32_t g_last_traced = 0;
+static uint32_t g_main_last_traced = 0;
 
 /* Trilha circular das ultimas funcoes alcancadas. Um contador por funcao diz o
    *quanto*; so a ordem diz *onde* uma thread desistiu. */
@@ -140,9 +144,11 @@ void trace_trail(const char* label) {
 }
 
 uint32_t trace_last_func(void) { return g_last_traced; }
+uint32_t trace_main_last_func(void) { return g_main_last_traced; }
 
 void recomp_trace(uint32_t vram) {
     g_last_traced = vram;
+    if (sched_current() == 0x800F9A50u) g_main_last_traced = vram;
     g_trail[g_trail_pos++ % TRAIL_MAX] = vram;
     g_trace_total++;
     if (!g_trace_counts) return;
@@ -224,6 +230,7 @@ static void trace_report(void) {
 }
 #else
 uint32_t trace_last_func(void) { return 0; }
+uint32_t trace_main_last_func(void) { return 0; }
 void trace_trail(const char* label) { (void)label; }
 static void trace_init(void) {}
 static void trace_report(void) {
@@ -900,6 +907,10 @@ static void report(const char* why) {
     watch_dump("final");
     texture_watch_report();
     dump_framebuffer(g_out_prefix);
+    /* Sonda opt-in da tela final. Reaproveita o mesmo formato do F5 para
+       localizar rótulos de menu descomprimidos sem depender de uma janela ou
+       de acertar manualmente o instante da captura. */
+    legendas_capturar_rdram(g_rdram, g_out_prefix, 999u);
     /* O VI mostra um buffer por vez, e o jogo desenha em varios. Despejar todos
        os alvos de SETCIMG e o que responde "algum deles tem conteudo?" sem
        depender de qual estava sendo apresentado no instante da parada. */
@@ -980,6 +991,10 @@ int main(int argc, char** argv) {
        sem se atrapalhar. Cada instancia recebe o seu proprio prefixo de saida; o
        resto muda o que se quer comparar entre elas. */
     const char* e;
+    CreateDirectoryA("temp", NULL);
+    CreateDirectoryA("temp/projeto", NULL);
+    CreateDirectoryA("temp/projeto/direto", NULL);
+    rsp_set_prefix(g_out_prefix);
     if ((e = getenv("WPJ2_TIMEOUT"))  != NULL) g_timeout_s = atof(e);
     if ((e = getenv("WPJ2_FRAME_SAMPLES")) != NULL) {
         unsigned n = (unsigned)strtoul(e, NULL, 0);

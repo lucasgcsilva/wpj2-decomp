@@ -278,3 +278,40 @@ confirma que parte do inglês visível é explicada pelo limite seguro da troca
 in-place. A execução durou 365,216 s, com 190,244 s de WAV, 21.860 retraces,
 10.795 tarefas gráficas e 10.904 tarefas de áudio. Os dumps, WAV e capturas
 brutos foram descartados após esta consolidação.
+
+## Rótulos rasterizados dos menus — tentativa rejeitada em 24/08/2026
+
+O formatador textual não recebe `Day` nem `Progress`. A sonda RDP confirmou
+que a tela de seleção de diário chega como uma imagem CI8 dinâmica de
+`256x168`, já com as palavras inglesas rasterizadas. Portanto esses rótulos
+não podem ser resolvidos pelo pareamento normal do TSV.
+
+Foi testado reconhecer a tela pelas três fichas coloridas, apagar os pixels
+ingleses e redesenhar `Dia`/`Avanço` no framebuffer. O teste interativo
+invalidou a abordagem: ficaram resíduos de sprites e o cursor passou a disputar
+os mesmos pixels. A alteração foi removida por completo. Esses rótulos devem
+ser substituídos no recurso nativo ou no escritor CPU que o constrói, nunca por
+uma edição tardia do framebuffer.
+
+Na mesma rodada, a aparente duplicação do cursor e parte do "lixo de sprite"
+foram separados do problema textual: o quad translúcido de seleção tinha
+`G_TEXTURE` desligado, mas o rasterizador 2D amostrava o tile anterior. A
+correção global de `G_TEXTURE_OFF` recuperou o realce e a ordem visual sem
+redesenhar nada. `Day` e `Progress` continuam sendo pixels de uma imagem CI8
+dinâmica em torno de `0x80358F50`; traduzi-los nativamente permanece pendente.
+
+A tela seguinte (`Message Speed`/`Bird's Speed`) também é gráfica. Ambas
+permanecem pendentes até o hook no escritor da imagem dinâmica.
+
+## Segurança do patch estático e glifos que colidem com `printf`
+
+O congelamento observado 5–6 segundos depois de confirmar `End` foi isolado na
+entrada `It's morning...` → `É de manhã...` (`0x008006DC`). O byte reservado
+para o glifo `ã` é `%`; no cartucho essa cadeia ainda atravessa `sprintf` e o
+glifo passa a ser interpretado como formato. O áudio continuava porque sua
+thread não dependia da thread principal presa em `vsprintf`.
+
+Traduções que geram essa colisão não são mais gravadas no cartucho. Elas devem
+ser aplicadas somente pelo interceptador do recurso vivo, depois da etapa de
+formatação. Não resolver isso duplicando `%`: recursos que passam por mais de
+um formatador voltariam a expor um `%` na passagem seguinte.

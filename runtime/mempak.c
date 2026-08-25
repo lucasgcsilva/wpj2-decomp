@@ -19,31 +19,30 @@ static int g_mempak_dirty = 0;
 static DWORD g_last_save_time = 0;
 static const char* g_mempak_filename = "sav\\mempak_port1.mpk";
 
-/* Tabela de CRC8 oficial do controlador N64 */
-static uint8_t mempak_crc_table[256];
-static int g_crc_table_initialized = 0;
-
-static void init_crc_table(void) {
-    if (g_crc_table_initialized) return;
-    for (int i = 0; i < 256; i++) {
-        uint8_t c = (uint8_t)i;
-        for (int j = 0; j < 8; j++) {
-            if (c & 0x80) {
-                c = (c << 1) ^ 0x85;
-            } else {
-                c <<= 1;
-            }
-        }
-        mempak_crc_table[i] = c;
-    }
-    g_crc_table_initialized = 1;
-}
-
 uint8_t mempak_calc_data_crc(const uint8_t* data, size_t length) {
-    init_crc_table();
+    /* Algoritmo exato de __osContDataCrc, confirmado em:
+     *
+     *   tools/libreultra/src/io/crc.c
+     *   tools/wonder-source/src/libultra/io/crc.c
+     *   tools/Project64-source/.../Mips/Mempak.cpp
+     *
+     * Nao e um CRC-8 comum aplicado apenas aos bytes. Depois dos 32 bytes o
+     * PIF desloca mais oito bits zero pelo polinomio 0x85. A antiga tabela
+     * omitia essa etapa; osContRamRead/Write podia rejeitar respostas validas
+     * com PFS_ERR_CONTRFAIL. Isto e uma correcao independente do congelamento
+     * visual posterior a `End`, cuja causa estava no estado G_TEXTURE. */
     uint8_t crc = 0;
     for (size_t i = 0; i < length; i++) {
-        crc = mempak_crc_table[crc ^ data[i]];
+        for (int bit = 7; bit >= 0; bit--) {
+            uint8_t xor_tap = (crc & 0x80u) ? 0x85u : 0u;
+            crc = (uint8_t)((crc << 1) | ((data[i] >> bit) & 1u));
+            crc ^= xor_tap;
+        }
+    }
+    for (int bit = 0; bit < 8; bit++) {
+        uint8_t xor_tap = (crc & 0x80u) ? 0x85u : 0u;
+        crc = (uint8_t)(crc << 1);
+        crc ^= xor_tap;
     }
     return crc;
 }
@@ -95,7 +94,6 @@ void mempak_flush(void) {
 
 void mempak_init(void) {
     if (g_mempak_loaded) return;
-    init_crc_table();
 
     CreateDirectoryA("sav", NULL);
     FILE* f = fopen(g_mempak_filename, "rb");

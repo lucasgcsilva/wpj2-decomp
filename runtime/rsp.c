@@ -77,6 +77,7 @@ static tri_alpha_chave_t g_tri_alpha_trace_chaves[96];
 static unsigned g_tri_alpha_trace_chaves_n = 0;
 static uint64_t g_alpha_trace_tarefa = 0;
 static int16_t g_alpha_trace_estado = 0, g_alpha_trace_subestado = 0;
+static uint8_t g_texture_definida_na_tarefa = 0;
 /* Sonda curta da logo ENIX: o zoom que mostra juncoes acontece em 8/1. */
 static FILE* g_texrect_trace = NULL;
 static int g_texrect_trace_inicializado = 0;
@@ -91,6 +92,12 @@ static int g_texrect_trace_gfx_min = -1, g_texrect_trace_gfx_max = -1;
  * rasterizador escreveu o mesmo alvo, sem despejar listas ou quadros. */
 static FILE* g_transicao_trace = NULL;
 static int g_transicao_trace_inicializado = 0;
+/* Captura opt-in de tarefas graficas exatas. Serve para ligar uma tela vista
+ * pelo usuario aos recursos/TEXRECT daquele mesmo quadro sem criar imagens na
+ * raiz. Ex.: WPJ2_CAPTURE_GFX=1529,1545,1700; WPJ2_OUT aponta para temp/. */
+static int g_capture_gfx_inicializado = 0;
+static uint64_t g_capture_gfx[32];
+static unsigned g_capture_gfx_n = 0;
 /* A lista de entrada envia pequenos lotes 2D e 3D sob o mesmo estado lógico.
  * Depois do primeiro TRI da nova cena, os mosaicos RGBA16 da imagem anterior
  * não podem mais voltar ao framebuffer: no hardware já pertencem ao quadro
@@ -138,6 +145,23 @@ static int g_rsp_debug = 1;
 
 static const char* g_prefixo = "";    /* prefixo de saida da corrida */
 void rsp_set_prefix(const char* p) { g_prefixo = p; }
+
+static int capturar_gfx_atual(void) {
+    if (!g_capture_gfx_inicializado) {
+        g_capture_gfx_inicializado = 1;
+        const char* e = getenv("WPJ2_CAPTURE_GFX");
+        while (e && *e && g_capture_gfx_n < 32u) {
+            char* fim = NULL;
+            unsigned long long v = strtoull(e, &fim, 0);
+            if (fim == e) break;
+            g_capture_gfx[g_capture_gfx_n++] = (uint64_t)v;
+            e = (*fim == ',') ? fim + 1 : fim;
+        }
+    }
+    for (unsigned i = 0; i < g_capture_gfx_n; i++)
+        if (g_capture_gfx[i] == g_gfx_listas) return 1;
+    return 0;
+}
 
 static uint32_t g_status = ST_HALT;   /* liga parado */
 static uint64_t g_tasks = 0;
@@ -299,10 +323,17 @@ void func_800CD010(uint8_t* rdram, recomp_context* ctx) {
             g_tarefa_tri_cull_frente = g_tarefa_tri_cull_tras = g_tarefa_tri_camera_recusados = 0;
             g_tarefa_z_aceitos = g_tarefa_z_recusados = 0;
             g_tarefa_tri_pixels = 0;
+            g_texture_definida_na_tarefa = 0;
             LARGE_INTEGER raster_inicio, raster_fim, raster_freq;
             QueryPerformanceCounter(&raster_inicio);
             desenhar_dl(rdram, lista, 0);
             QueryPerformanceCounter(&raster_fim);
+            if (g_cimg_addr && capturar_gfx_atual()) {
+                char rot[96];
+                snprintf(rot, sizeof(rot), "%scaptura_gfx_%llu_cimg_%06X",
+                         g_prefixo, (unsigned long long)g_gfx_listas, g_cimg_addr);
+                rsp_dump_alvo(rdram, rot, g_cimg_addr);
+            }
             g_ultima_gfx_indice = g_gfx_listas;
             g_ultima_gfx_tri_recebidos = g_tarefa_tri_recebidos;
             g_ultima_gfx_tri_desenhados = g_tarefa_tri_desenhados;
@@ -733,6 +764,10 @@ static float g_mtx_sy_min = 1.0e30f, g_mtx_sy_max = -1.0e30f;
  * TEXRECT ja traz o tile no proprio comando, mas TRI1 depende deste estado. */
 static uint8_t g_texture_tile = 0;
 static uint8_t g_texture_ligada = 0;
+/* Alguns lotes 2D partem do estado inicial da nova OSTask e nao repetem
+ * gSPTexture(G_ON). Um OFF emitido pelo quad de realce nao pode contaminar a
+ * tarefa seguinte: isso deixa a imagem estagnada enquanto logica, VI e audio
+ * continuam. Dentro da mesma tarefa, contudo, ON/OFF deve valer normalmente. */
 /* G_TEXTURE leva duas escalas 16.16. Os vertices continuam em 5.10, logo a
  * conversao para a coordenada que chega ao tile e feita por triangulo. */
 static uint16_t g_texture_scale_s = 0xFFFFu, g_texture_scale_t = 0xFFFFu;
@@ -1844,7 +1879,14 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
         /* Quando G_TEXTURE desliga a unidade, SHADE/PRIMITIVE ainda podem
          * formar gradientes no fundo. Amostrar o ultimo tile neste caso deixa
          * manchas que nao existem no RDP. */
-        int textura_ativa = !semantica_texture_3d || g_texture_ligada;
+        /* G_TEXTURE vale para qualquer lista F3DEX, nao apenas para o 3D.
+         * Os menus desenham o realce da opcao com quatro vertices SHADE,
+         * gSPTexture(G_OFF) e G_RM_AA_XLU_SURF. Ignorar o G_OFF nas cenas 2D
+         * fazia o quad amostrar o ultimo tile, apagando o retangulo vermelho
+         * ou transformando-o em lixo de sprite sobre o cursor. */
+        int textura_ativa = semantica_texture_3d
+            ? (g_texture_ligada != 0)
+            : (!g_texture_definida_na_tarefa || g_texture_ligada != 0);
         uint16_t cor = textura_ativa ? texel(T, (uint32_t)si, (uint32_t)ti, &ok) : 0xFFFFu;
         if (!ok || (textura_ativa && !(cor & 1))) continue;
         int filtro_tri = g_tex_filter;
@@ -2454,6 +2496,7 @@ static void desenhar_dl(uint8_t* rdram, uint32_t phys, int nivel) {
             case 0xBC: move_word(w0, w1); break;            /* MOVEWORD */
             case 0xBB:                                      /* TEXTURE */
                 g_texture_tile = (uint8_t)((w0 >> 8) & 7u);
+                g_texture_definida_na_tarefa = 1;
                 g_texture_ligada = (uint8_t)(w0 & 1u);
                 g_texture_scale_s = (uint16_t)(w1 >> 16);
                 g_texture_scale_t = (uint16_t)w1;

@@ -53,6 +53,10 @@ static inline void ctx_init(recomp_context* c) {
 
 /* Ultima funcao recompilada em que se entrou, ou 0 em build sem tracing. */
 uint32_t trace_last_func(void);
+/* Ultima funcao observada especificamente na thread principal do jogo. Audio,
+ * idle e scheduler continuam executando durante um congelamento e tornam a
+ * metrica global enganosa. */
+uint32_t trace_main_last_func(void);
 
 /* Imprime as ultimas funcoes alcancadas, da mais antiga para a mais recente. */
 void trace_trail(const char* label);

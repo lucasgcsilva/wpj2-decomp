@@ -69,6 +69,46 @@ void func_80090E58(uint8_t* rdram, recomp_context* ctx) {
     if (args_phys + 4u <= 0x00400000u) {
         uint32_t source = (uint32_t)MEM_W(0, (gpr)(int32_t)args);
         legendas_substituir_recurso(rdram, source);
+        /* Auditoria opt-in da entrada EXATA do formatador. Os rotulos da tela
+         * de saves nao aparecem como ASCII nem no cartucho nem no dump final;
+         * registrar os bytes antes da conversao permite distinguir texto com
+         * controles de uma imagem pre-renderizada. Desligado, custa apenas a
+         * leitura unica da chave. */
+        {
+            static int auditar = -1;
+            static FILE* arquivo = NULL;
+            static unsigned linhas = 0;
+            if (auditar < 0) {
+                const char* e = getenv("WPJ2_AUDITAR_FORMATADOR");
+                auditar = e && *e && *e != '0';
+                if (auditar) {
+                    char caminho[MAX_PATH + 64];
+                    const char* out = getenv("WPJ2_OUT");
+                    snprintf(caminho, sizeof(caminho), "%sformatador_fontes.tsv",
+                             out && *out ? out : "temp\\");
+                    arquivo = fopen(caminho, "w");
+                    if (arquivo) fputs("ponteiro\thex\tascii\n", arquivo);
+                }
+            }
+            uint32_t phys = source & 0x1FFFFFFFu;
+            if (arquivo && linhas++ < 8192u && phys < 0x00800000u) {
+                fprintf(arquivo, "0x%06X\t", phys);
+                unsigned n = 0;
+                while (n < 96u && phys + n < 0x00800000u) {
+                    uint8_t b = rdram[(phys + n) ^ 3u];
+                    if (!b) break;
+                    fprintf(arquivo, "%02X", b);
+                    n++;
+                }
+                fputc('\t', arquivo);
+                for (unsigned i = 0; i < n; i++) {
+                    uint8_t b = rdram[(phys + i) ^ 3u];
+                    fputc(b >= 0x20u && b <= 0x7Eu ? b : '.', arquivo);
+                }
+                fputc('\n', arquivo);
+                fflush(arquivo);
+            }
+        }
         /* Despejo em hexadecimal da cadeia que o formatador vai consumir.
          *
          * Existe porque o 'a' agudo saiu em branco na tela mesmo com o glifo
@@ -1031,7 +1071,7 @@ static void status_note(uint8_t* rdram) {
                    "camera_descartados=%llu\ntriangulos_culled=%llu\n"
                    "prim=%08X\nenv=%08X\nothermode_l=%08X\n"
                    "alpha_texrects=%llu\nalpha_rect=%u,%u,%u,%u\n"
-                   "running=%08X\nrun_queue=%08X\nrsp_done=%d\ndp_pendente=%d\n"
+                   "running=%08X\nmain_func=%08X\nrun_queue=%08X\nrsp_done=%d\ndp_pendente=%d\n"
                    "sp_fila=%08X %u/%u\nsp_espera=%08X prox=%08X\n"
                    "dp_fila=%08X %u/%u\ntask_thread=%08X estado=%u fila=%08X\n",
             (unsigned long long)now,
@@ -1052,7 +1092,8 @@ static void status_note(uint8_t* rdram) {
              rsp_prim_color(), rsp_env_color(), rsp_othermode_l(),
              (unsigned long long)rsp_alpha_texrects(),
              rsp_alpha_rect_x0(), rsp_alpha_rect_y0(), rsp_alpha_rect_x1(), rsp_alpha_rect_y1(),
-             rd32(rdram, ADDR_RUNNING_THREAD), rd32(rdram, ADDR_RUN_QUEUE),
+             rd32(rdram, ADDR_RUNNING_THREAD), trace_main_last_func(),
+             rd32(rdram, ADDR_RUN_QUEUE),
             rsp_peek_task_done(), g_rsp_dp_pending,
             spq, spq ? rd32(rdram, spq + 0x08) : 0, spq ? rd32(rdram, spq + 0x10) : 0,
             sp_wait, sp_wait ? rd32(rdram, sp_wait) : 0,

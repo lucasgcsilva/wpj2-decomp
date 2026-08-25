@@ -73,3 +73,20 @@
   `func_80096B38` para slots expansíveis com vida útil vinculada ao recurso,
   preservando controles `E0/E1/E2` e digitação progressiva. Não encurtar
   automaticamente as 694 traduções como substituto para a correção do runtime.
+
+# Menus — rótulos ingleses rasterizados em recursos gráficos
+
+- **Impacto:** médio. A seleção de diário ainda contém `Day` e `Progress`; a
+  tela seguinte contém `Message Speed`, `Bird's Speed`, `Fast` e `Slow`.
+- **Causa confirmada:** essas palavras não chegam ao formatador textual; já
+  estão rasterizadas numa imagem dinâmica antes de serem enviadas ao RDP.
+- **Tentativa rejeitada:** apagar e redesenhar texto no framebuffer produziu
+  resíduos de sprites e conflito de ordenação com o cursor. Essa rota foi
+  removida.
+- **Próxima revisão:** interceptar a rotina CPU que grava a imagem CI8 ou
+  substituir seu recurso-fonte antes da rasterização. Não desenhar uma camada
+  por cima da janela nem editar o framebuffer depois da composição.
+- **Separação concluída em 24/08:** o realce vermelho e a duplicação aparente
+  do cursor não eram parte da tradução. Eram um quad F3DEX sem textura que o
+  rasterizador tratava como texturizado; `G_TEXTURE_OFF` agora é respeitado em
+  2D e 3D. O que resta neste item são somente os rótulos já rasterizados.

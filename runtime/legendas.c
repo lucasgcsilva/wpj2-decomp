@@ -794,6 +794,8 @@ static uint32_t f32_localizar_por_assinatura(uint8_t* rdram) {
     return base;
 }
 
+static void f32_compor_em(uint8_t* rdram, uint32_t base);
+
 /* ---- Cerco do instante em que a acentuacao e desfeita ----
  *
  * Sabemos por medicao que a marca nao sobrevive de um quadro ao seguinte
@@ -870,9 +872,6 @@ void legendas_conferir_marca(uint8_t* rdram, const char* ponto) {
         ultimo_vivo = ponto;
     }
 }
-
-/* Compoe numa base ja validada. Separado para poder varrer varias. */
-static void f32_compor_em(uint8_t* rdram, uint32_t base);
 
 /* Varre TODA a familia de ponteiros de fonte, em vez de escolher um.
  *
@@ -1585,6 +1584,23 @@ static size_t make_ascii(char* out, size_t capacity, const char* text) {
     return written;
 }
 
+static int cart_text_has_format_collision(const char* text) {
+    size_t in = 0;
+    while (text[in]) {
+        size_t advance;
+        char folded = fold_utf8((const unsigned char*)text + in, &advance);
+        /* COD_A_TIL e o proprio '%'. Recursos do cartucho podem atravessar
+         * sprintf mais de uma vez; nem "%%" e estavel nesse caso, pois a
+         * primeira passagem o reduz novamente a '%'. O interceptador de
+         * recurso vivo roda depois dessa formatacao e e o lugar seguro. */
+        if ((uint8_t)folded == COD_A_TIL &&
+            (unsigned char)text[in] >= 0x80u)
+            return 1;
+        in += advance;
+    }
+    return 0;
+}
+
 static size_t make_fixed_ascii(char* out, size_t bytes, const char* text) {
     size_t written = make_ascii(out, bytes + 1u, text);
     while (written < bytes) out[written++] = ' ';
@@ -1594,7 +1610,12 @@ static size_t make_fixed_ascii(char* out, size_t bytes, const char* text) {
 
 static uint32_t prefix_key_text(const char* text) {
     uint32_t key = 0;
-    for (uint32_t i = 0; i < 4u; i++) key |= (uint32_t)(uint8_t)text[i] << (i * 8u);
+    /* Cadeias curtas tambem sao chaves legitimas (Day -> Dia, Del ->
+     * Apagar). A versao antiga lia sempre quatro bytes e depois as rejeitava;
+     * alem de impedir a traducao, ler depois do NUL era indefinido para
+     * entradas alocadas no tamanho exato. Complete a chave com zeros. */
+    for (uint32_t i = 0; i < 4u && text[i]; i++)
+        key |= (uint32_t)(uint8_t)text[i] << (i * 8u);
     return key;
 }
 
@@ -1702,7 +1723,7 @@ int legendas_substituir_recurso(uint8_t* rdram, uint32_t pointer) {
     while (source_n && (source[source_n - 1] == '\n' || source[source_n - 1] == '\r'))
         source_n--;
     source[source_n] = '\0';
-    if (source_n < 4u) return 0;
+    if (!source_n) return 0;
 
     subtitle_entry_t* entry = find_entry(source);
     if (!entry) return 0;
@@ -1811,7 +1832,7 @@ static void trace_source(const char* status, const char* source) {
 }
 
 static subtitle_entry_t* find_entry(const char* source) {
-    if (strlen(source) < 4u) return NULL;
+    if (!*source) return NULL;
     uint32_t bucket = prefix_key_text(source) % HASH_BUCKETS;
     for (int index = g_prefix_buckets[bucket]; index >= 0;
          index = g_entries[index].next)
@@ -1948,18 +1969,39 @@ void legendas_aplicar_cartucho(uint8_t* cart, size_t rom_size) {
     g_cart_bytes = rom_size;
     init_once();
     if (!g_enabled) return;
+    {
+        const char* sem_cartucho = getenv("WPJ2_LEGENDAS_SEM_CARTUCHO");
+        if (sem_cartucho && *sem_cartucho && *sem_cartucho != '0') return;
+    }
     /* O compositor de ROM foi uma hipotese anterior e escreve numa fonte
      * dormente da T-En. Deixe-o apenas como controle diagnostico explicito;
      * a rota valida recompõe o objeto vivo em func_80094230. */
     if (getenv("WPJ2_ACENTOS_LEGADO") &&
         atoi(getenv("WPJ2_ACENTOS_LEGADO")) != 0)
         compor_fonte_no_cartucho(cart, rom_size);
+    size_t entry_limit = g_entry_count;
+    {
+        const char* limite = getenv("WPJ2_CART_ENTRY_LIMIT");
+        if (limite && *limite) {
+            unsigned long n = strtoul(limite, NULL, 0);
+            if (n < entry_limit) entry_limit = (size_t)n;
+        }
+    }
     unsigned patched = 0, skipped_long = 0;
     for (size_t pos = 0; pos + 4u <= rom_size; pos++) {
         uint32_t bucket = prefix_key_cart(cart, pos) % HASH_BUCKETS;
         for (int index = g_prefix_buckets[bucket]; index >= 0; index = g_entries[index].next) {
+            if ((size_t)index >= entry_limit) continue;
             subtitle_entry_t* entry = &g_entries[index];
             size_t length = entry->source_len;
+            /* Cadeias pequenas nao formam uma assinatura segura para varrer
+             * uma ROM inteira. `End`/`Day` e outras palavras tambem aparecem
+             * em estruturas binarias;
+             * substituir cada coincidencia criou um ciclo no grafo consumido
+             * por vsprintf e congelou a thread principal. Cadeias curtas
+             * continuam validas no interceptador dinamico; no cartucho elas
+             * exigem um endereco previamente confirmado. */
+            if (length < 8u) continue;
             if (pos + length > rom_size) continue;
             size_t i = 0;
             while (i < length && cart[(pos + i) ^ 3u] == (uint8_t)entry->source[i]) i++;
@@ -1990,6 +2032,10 @@ void legendas_aplicar_cartucho(uint8_t* cart, size_t rom_size) {
             }
             char fixed[MAX_TEXT + 1];
             char translated[MAX_TEXT + 1];
+            if (cart_text_has_format_collision(entry->translated)) {
+                skipped_long++;
+                continue;
+            }
             size_t translated_len = make_ascii(translated, sizeof(translated), entry->translated);
             /* Mede a folga em vez de presumir que o bloco tem o tamanho do
              * texto ingles - mesma correcao aplicada ao interceptador
@@ -2005,11 +2051,12 @@ void legendas_aplicar_cartucho(uint8_t* cart, size_t rom_size) {
              * seguinte continua intocado. Precisamos de posicoes
              * 0..translated_len-1 mais o NUL, logo comparamos contra
              * length + folga - 1. */
-            size_t folga = 0;
-            while (folga < FOLGA_MAX && pos + length + folga < rom_size &&
-                   cart[(pos + length + folga) ^ 3u] == 0)
-                folga++;
-            size_t capacidade = folga ? length + folga - 1u : length;
+            /* No cartucho, zero adjacente pode ser campo de uma estrutura e
+             * nao preenchimento livre. A expansao sobre essa suposta folga
+             * corrompeu objetos usados pelo formatador `%l%s`. Expansao fica
+             * restrita ao recurso dinamico, onde a capacidade e observada
+             * depois da descompressao. */
+            size_t capacidade = length;
             if (translated_len > capacidade) {
                 skipped_long++;
                 continue;
@@ -2017,10 +2064,41 @@ void legendas_aplicar_cartucho(uint8_t* cart, size_t rom_size) {
             /* make_fixed_ascii preenche exatamente `destino` bytes com o texto
              * e completa com zeros, entao passar a capacidade usada mantem o
              * terminador dentro da folga medida. */
-            size_t destino = translated_len > length ? translated_len : length;
+            size_t destino = length;
             make_fixed_ascii(fixed, destino, entry->translated);
             for (i = 0; i < destino; i++) cart[(pos + i) ^ 3u] = (uint8_t)fixed[i];
-            if (destino > length) cart[(pos + destino) ^ 3u] = 0;
+            patched++;
+        }
+    }
+    /* Excecoes curtas verificadas na ROM T-En. O `End` deste endereco pertence
+     * a tela Message/Bird Speed; as outras ocorrencias ficam intocadas e podem
+     * ser traduzidas quando chegarem como recurso textual vivo. */
+    {
+        static const struct { size_t offset; const char* source; } exact[] = {
+            { 0x0068B8E8u, "Start" },
+            { 0x0068B8F0u, "Delete Diary" },
+            { 0x0068B900u, "Copy Diary" },
+            { 0x0068B90Cu, "Start without saving" },
+            { 0x0068BC70u, "Start without saving" },
+            { 0x0068BED0u, "End" },
+            { 0x0068BED8u, "Back" },
+        };
+        for (size_t e = 0; e < sizeof(exact) / sizeof(exact[0]); e++) {
+            subtitle_entry_t* entry = find_entry(exact[e].source);
+            size_t n = strlen(exact[e].source);
+            if (!entry || exact[e].offset + n > rom_size) continue;
+            size_t i = 0;
+            while (i < n && cart[(exact[e].offset + i) ^ 3u] ==
+                              (uint8_t)exact[e].source[i]) i++;
+            if (i != n) continue;
+            char translated[MAX_TEXT + 1];
+            if (cart_text_has_format_collision(entry->translated)) continue;
+            size_t translated_len = make_ascii(translated, sizeof(translated),
+                                               entry->translated);
+            if (!translated_len || translated_len > n) continue;
+            for (i = 0; i < n; i++)
+                cart[(exact[e].offset + i) ^ 3u] =
+                    i < translated_len ? (uint8_t)translated[i] : (uint8_t)' ';
             patched++;
         }
     }
