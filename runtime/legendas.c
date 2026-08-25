@@ -813,7 +813,11 @@ static uint32_t g_marca_base = 0;
 static int g_marca_viva = 0;
 
 void legendas_conferir_marca(uint8_t* rdram, const char* ponto) {
-    if (!getenv("WPJ2_CERCO_MARCA") || !g_marca_base) return;
+    /* Chave lida uma vez. Esta funcao chegou a ser chamada do plotador, que
+       roda milhoes de vezes; um getenv por chamada ali derrubava a taxa. */
+    static int ligado = -1;
+    if (ligado < 0) ligado = getenv("WPJ2_CERCO_MARCA") != NULL;
+    if (!ligado || !g_marca_base) return;
     /* A base ainda e a mesma? Um 'A' intacto no lugar esperado responde. */
     int base_ok = f32_confere(rdram, g_marca_base);
     int marca_ok = base_ok &&
@@ -912,10 +916,21 @@ void compor_fonte32(uint8_t* rdram) {
             f32_compor_em(rdram, cand);
         }
     }
-    /* Rede de seguranca: se nenhum ponteiro serviu, tenta a assinatura. */
+    /* Rede de seguranca, MAS espacada no tempo.
+     *
+     * f32_localizar_por_assinatura varre os 8 MB de RDRAM. Rodando a cada
+     * quadro em que nenhum ponteiro valida - o que acontece sempre que a cena
+     * troca e a fonte ainda nao esta posta - isso trava o jogo. Foi parte da
+     * lentidao de cursor relatada apos a acentuacao.
+     *
+     * Uma tentativa a cada 300 chamadas mantem a rede util para o caso raro em
+     * que os ponteiros falham, sem cobrar a varredura do quadro inteiro. */
     if (!n_feitas) {
-        uint32_t b = f32_localizar_por_assinatura(rdram);
-        if (b) { feitas[n_feitas++] = b; f32_compor_em(rdram, b); }
+        static unsigned espera = 0;
+        if ((espera++ % 300u) == 0u) {
+            uint32_t b = f32_localizar_por_assinatura(rdram);
+            if (b) { feitas[n_feitas++] = b; f32_compor_em(rdram, b); }
+        }
     }
     static unsigned relatado = 0;
     if (n_feitas && relatado != n_feitas) {
@@ -1949,6 +1964,30 @@ void legendas_aplicar_cartucho(uint8_t* cart, size_t rom_size) {
             size_t i = 0;
             while (i < length && cart[(pos + i) ^ 3u] == (uint8_t)entry->source[i]) i++;
             if (i != length) continue;
+            /* A cadeia tem de terminar aqui - nao basta bater o prefixo.
+             *
+             * O menu guarda as opcoes num bloco contiguo separado por \n:
+             *
+             *     0x68B8E8 "Start\n"  "Delete Diary\n"  "Copy Diary\n"
+             *     0x68B90C "Start without saving\n"
+             *
+             * Sem esta guarda, uma entrada curta como "Start" casaria tambem
+             * no comeco de "Start without saving" e produziria "Jogar without
+             * saving". O terminador aqui e \n ou \r, e nao so o NUL. */
+            {
+                uint8_t depois = (pos + length < rom_size)
+                               ? cart[(pos + length) ^ 3u] : 0u;
+                /* Rejeitar somente quando o byte seguinte for ASCII
+                 * imprimivel, que e o unico caso em que a nossa cadeia e
+                 * prefixo de algo maior.
+                 *
+                 * Listar terminadores aceitos seria frágil: alem de NUL e \n,
+                 * o texto do jogo embute controles E0/E1/E2 para pausa,
+                 * variavel e cor do falante, e uma fala pode terminar num
+                 * deles. Uma lista curta rejeitaria essas e derrubaria
+                 * traducoes que hoje funcionam. */
+                if (depois >= 0x20u && depois < 0x7Fu) continue;
+            }
             char fixed[MAX_TEXT + 1];
             char translated[MAX_TEXT + 1];
             size_t translated_len = make_ascii(translated, sizeof(translated), entry->translated);

@@ -91,7 +91,12 @@ void func_80090E58(uint8_t* rdram, recomp_context* ctx) {
          * O primeiro byte e 'A', que sabidamente desenha. Ele e o controle: se
          * nem ele aparecer, o problema nao e a lista de aceitos e sim esta
          * sonda. Cabe em 14 bytes, o tamanho da cadeia substituida. */
-        if (getenv("WPJ2_SONDA_CODIGOS")) {
+        /* Chaves lidas UMA vez. func_80090E58 roda por caractere; um getenv
+           por letra aqui pesa, e foi parte da lentidao apos a acentuacao. */
+        static int sonda_ligada = -1, despejo_ligado = -1;
+        if (sonda_ligada < 0) sonda_ligada = getenv("WPJ2_SONDA_CODIGOS") != NULL;
+        if (despejo_ligado < 0) despejo_ligado = getenv("WPJ2_DESPEJO_TEXTO") != NULL;
+        if (sonda_ligada) {
             /* UMA vez, e nao a cada chamada.
              *
              * O formatador e chamado por CARACTERE, com o ponteiro andando um
@@ -123,7 +128,7 @@ void func_80090E58(uint8_t* rdram, recomp_context* ctx) {
                 }
             }
         }
-        if (getenv("WPJ2_DESPEJO_TEXTO")) {
+        if (despejo_ligado) {
             static unsigned emitidos;
             uint32_t phys = source & 0x1FFFFFFFu;
             if (phys && phys < 0x00800000u && emitidos < 12u) {
@@ -270,8 +275,18 @@ static uint32_t rdram32(uint8_t* rdram, uint32_t phys) {
     return *(uint32_t*)(rdram + phys);
 }
 
+/* NADA de diagnostico neste corpo.
+ *
+ * Esta funcao desenha um pixel e e chamada milhoes de vezes por execucao - o
+ * histograma mediu 2,8 milhoes em quarenta segundos. Qualquer coisa aqui e
+ * multiplicada por esse numero, e getenv() em particular custa caro. Havia um
+ * cerco de marca e um histograma de chamadores instalados aqui durante a caca
+ * a fonte; os dois cumpriram o papel, foram removidos, e a lentidao do cursor
+ * relatada depois da acentuacao vinha deles.
+ *
+ * Se for preciso instrumentar de novo, feche a chave num `static` lido uma
+ * vez, nunca com getenv por chamada. */
 void func_80090784(uint8_t* rdram, recomp_context* ctx) {
-    legendas_conferir_marca(rdram, "90784-plotador");
     uint32_t a0 = (uint32_t)ctx->r4;
     uint32_t a1 = (uint32_t)ctx->r5;
     uint32_t base = kseg0((uint32_t)ctx->r6);
@@ -295,28 +310,10 @@ void func_80090784(uint8_t* rdram, recomp_context* ctx) {
      * func_80094230 (nenhuma chamada com codigo de caractere) e a fonte 8x8
      * (vandalismo sem efeito), quem chama func_80090784 de fato e a pergunta
      * que resta. Contar por pai responde direto. */
-    {
-        #define PAIS_MAX 16
-        static uint32_t pais[PAIS_MAX];
-        static uint64_t pais_n[PAIS_MAX];
-        static unsigned n_pais = 0;
-        uint32_t pai = trace_last_func();
-        unsigned i;
-        for (i = 0; i < n_pais; i++) if (pais[i] == pai) break;
-        if (i == n_pais && n_pais < PAIS_MAX) { pais[n_pais++] = pai; pais_n[i] = 0; }
-        if (i < PAIS_MAX) pais_n[i]++;
-        if (getenv("WPJ2_PAIS_PLOTADOR")) {
-            static unsigned periodo = 0;
-            if ((periodo++ % 200000u) == 0u) {
-                printf("[plot] chamadores de func_80090784:");
-                for (unsigned k = 0; k < n_pais; k++)
-                    printf(" func_%08X=%llu", pais[k],
-                           (unsigned long long)pais_n[k]);
-                printf("\n");
-                fflush(stdout);
-            }
-        }
-    }
+    /* O histograma de chamadores que existia aqui foi retirado. Ele nao so
+       custava um getenv por pixel como deu resposta enganosa: apontou
+       func_80095F9C, que a referencia mostra ser um mapeador de codigo. Com
+       fibers, trace_last_func() nao identifica chamador. */
     uint32_t addr = kseg0(base + offset * ((mode & 0x400u) ? 1u : 2u));
     if (texture_address(addr)) {
         g_raster_atlas_total++;
@@ -395,7 +392,9 @@ void func_80094230(uint8_t* rdram, recomp_context* ctx) {
      * primeira chamada mas so no encerramento - e a essa altura a regiao ja
      * fora liberada e reaproveitada. O arquivo saia inteiro zerado e parecia
      * indicar que a tabela nao era de glifos. Aqui ela ainda esta em uso. */
-    if (getenv("WPJ2_EXPORTAR_OBJETOS")) {
+    static int exportar_ligado = -1;
+    if (exportar_ligado < 0) exportar_ligado = getenv("WPJ2_EXPORTAR_OBJETOS") != NULL;
+    if (exportar_ligado) {
         static int exportado = 0;
         if (!exportado && tabela && tabela + 0x10000u <= 0x800000u) {
             exportado = 1;
