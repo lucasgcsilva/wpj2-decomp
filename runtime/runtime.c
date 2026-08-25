@@ -931,6 +931,43 @@ static void report(const char* why) {
     fflush(stdout);
 }
 
+/* Le o arquivo de reproducao gravado pelo F2.
+ *
+ * Formato de duas chaves, uma por linha, escolhido para ser legivel e colavel:
+ *
+ *     alvo=1234
+ *     roteiro=0:0000;812:1000;830:0000
+ *
+ * `roteiro` tem exatamente a sintaxe de WPJ2_INPUT_POLLS, indexada por leitura
+ * de controle e nao por tempo - e isso que torna a reproducao repetivel. */
+static void carregar_replay(const char* caminho) {
+    FILE* f = fopen(caminho, "r");
+    if (!f) {
+        printf("[replay] nao consegui abrir %s\n", caminho);
+        return;
+    }
+    static char linha[8192];
+    unsigned long long alvo = 0;
+    while (fgets(linha, sizeof(linha), f)) {
+        char* fim = linha + strlen(linha);
+        while (fim > linha && (fim[-1] == '\n' || fim[-1] == '\r')) *--fim = '\0';
+        if (linha[0] == '#' || !linha[0]) continue;
+        if (!strncmp(linha, "alvo=", 5)) {
+            alvo = strtoull(linha + 5, NULL, 10);
+        } else if (!strncmp(linha, "roteiro=", 8)) {
+            pif_set_poll_script(linha + 8);
+        }
+    }
+    fclose(f);
+    printf("[replay] %s carregado\n", caminho);
+    /* O turbo so vale a pena um pouco antes do alvo: parar exatamente nele
+       deixaria a cena aparecer no mesmo instante em que a velocidade normaliza,
+       sem margem para observar a entrada. */
+    if (alvo > 30ull) hle_definir_alvo_turbo(alvo - 30ull);
+    else if (alvo) hle_definir_alvo_turbo(alvo);
+    fflush(stdout);
+}
+
 /* ------------------------------------------------------------------ */
 
 int main(int argc, char** argv) {
@@ -954,6 +991,12 @@ int main(int argc, char** argv) {
     if ((e = getenv("WPJ2_BUTTONS"))  != NULL) pif_set_buttons((uint16_t)strtoul(e, NULL, 0));
     if ((e = getenv("WPJ2_INPUT"))    != NULL) pif_set_script(e);
     if ((e = getenv("WPJ2_INPUT_POLLS")) != NULL) pif_set_poll_script(e);
+    /* Reproducao gravada: substitui o savestate. Um arquivo com duas chaves,
+       `alvo=` e `roteiro=`, produzido pelo F2. Ver o comentario extenso em
+       runtime/pif.c sobre por que um savestate ao estilo Project64 nao e
+       alcancavel com fibers, e por que a reproducao resolve melhor o problema
+       real, que e voltar depressa a uma cena para analisar. */
+    if ((e = getenv("WPJ2_REPLAY")) != NULL && *e) carregar_replay(e);
     if ((e = getenv("WPJ2_STICK"))    != NULL) pif_set_stick(e);
     if ((e = getenv("WPJ2_RETRACE"))  != NULL) hle_set_retrace(atof(e));
     if ((e = getenv("WPJ2_WINDOW"))   != NULL) g_video_preview = atoi(e) != 0;

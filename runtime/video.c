@@ -430,6 +430,23 @@ static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     if (msg == WM_KEYDOWN && wp == VK_F2 && !(lp & (1L << 30))) {
         video_checkpoint_f2();
+        /* Alem do checkpoint de RDRAM, grava um ponto de REPRODUCAO.
+         *
+         * Os dois servem ao mesmo desejo - voltar a esta cena - mas so o
+         * segundo e confiavel. O checkpoint restaura a RDRAM por baixo de
+         * fibers cujas pilhas continuam na posicao antiga, e por isso trava com
+         * facilidade; a reproducao refaz o caminho como execucao normal, com
+         * a entrada vinda do roteiro. Ver o comentario em runtime/pif.c. */
+        {
+            char pasta[MAX_PATH] = "temp\\projeto\\testar";
+            DWORD n = GetEnvironmentVariableA("WPJ2_CAPTURE_DIR", pasta, sizeof(pasta));
+            if (n < sizeof(pasta)) {
+                char caminho[MAX_PATH + 32];
+                CreateDirectoryA(pasta, NULL);
+                snprintf(caminho, sizeof(caminho), "%s\\replay.txt", pasta);
+                pif_gravar_replay(caminho);
+            }
+        }
         return 0;
     }
     if (msg == WM_KEYDOWN && wp == VK_F4 && !(lp & (1L << 30))) {

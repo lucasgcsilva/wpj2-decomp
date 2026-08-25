@@ -11,6 +11,8 @@ Resultados produzidos pelo runtime deste projeto e já interpretados.
   ADPCM transferidas pelo PI para o cache de áudio.
 - `graficos_clipping_corredor.md`: regressão causada pela perda da chave de
   recorte F3DEX e restauração do clipping homogêneo no corredor.
+- `acentuacao_ptbr.md`: causa do `#` no lugar dos acentos, correção da cópia
+  inicial da fonte Ryu e validação dos 14 glifos especiais.
 - `integracao_legendas.md`: rota real do diálogo inglês descompactado e estado
   da substituição PT-BR.
 - `referencia_wonder_llonsit.md`: avaliação da decompilação pública da ROM

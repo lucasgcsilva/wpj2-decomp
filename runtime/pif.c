@@ -44,6 +44,9 @@ static volatile uint16_t g_buttons = 0;
  * definicao com inicializador fica mais abaixo, junto dos roteiros. */
 static int g_roteiro_n;
 static int g_roteiro_poll_n;
+/* Definicao tentativa: o contador vive mais abaixo, junto do roteiro por
+   leitura, mas a gravacao de reproducao precisa dele aqui em cima. */
+static uint64_t g_polls_controle;
 
 /* Entrada ao vivo tem prioridade sobre roteiro gravado.
  *
@@ -74,6 +77,64 @@ void pif_set_buttons(uint16_t b) {
     }
     g_buttons = b;
 }
+
+/* Gravacao de entrada para reproducao posterior.
+ *
+ * Por que isto existe, e por que nao um savestate. Um savestate ao estilo
+ * Project64 nao e alcancavel aqui: o PJ64 emula a CPU e guarda todo o estado
+ * numa struct, enquanto neste projeto cada thread do N64 e uma fiber do
+ * Windows e a posicao de execucao dela E a pilha de chamadas C do codigo
+ * recompilado. O Win32 nao expoe o contexto salvo de uma fiber, e a pilha
+ * carrega ponteiros do host. Restaurar so a RDRAM - que e o que o F2/F4 atual
+ * faz - troca o mundo por baixo de fibers que continuam achando que estao
+ * noutro ponto; daí travar com facilidade.
+ *
+ * O que se quer de verdade e chegar rapido e de forma repetivel a uma cena
+ * para analisar. Isso a reproducao resolve por construcao, sem nenhum risco de
+ * inconsistencia: e uma execucao normal, so que com a entrada vindo de um
+ * roteiro em vez do teclado.
+ *
+ * O indice e a CONTAGEM DE LEITURAS do controle, nao o relogio. Milissegundos
+ * escorregam conforme a carga do host - foi o motivo de g_roteiro_poll existir
+ * - enquanto a n-esima leitura e sempre a n-esima leitura. */
+#define GRAVACAO_MAX 4096
+static struct { uint64_t poll; uint16_t botoes; } g_gravacao[GRAVACAO_MAX];
+static unsigned g_gravacao_n = 0;
+
+void pif_gravar_transicao(uint16_t b) {
+    static uint16_t ultimo = 0;
+    static int primeira = 1;
+    if (!primeira && b == ultimo) return;
+    primeira = 0;
+    ultimo = b;
+    if (g_gravacao_n < GRAVACAO_MAX) {
+        g_gravacao[g_gravacao_n].poll = g_polls_controle;
+        g_gravacao[g_gravacao_n].botoes = b;
+        g_gravacao_n++;
+    }
+}
+
+int pif_gravar_replay(const char* caminho) {
+    FILE* f = fopen(caminho, "w");
+    if (!f) return 0;
+    /* Formato deliberadamente igual ao aceito por WPJ2_INPUT_POLLS, para poder
+       colar direto numa linha de comando sem conversao. */
+    fprintf(f, "# reproducao wpj2: alvo=%llu leituras\n",
+            (unsigned long long)g_polls_controle);
+    fprintf(f, "alvo=%llu\n", (unsigned long long)g_polls_controle);
+    fprintf(f, "roteiro=");
+    for (unsigned i = 0; i < g_gravacao_n; i++)
+        fprintf(f, "%s%llu:%04X", i ? ";" : "",
+                (unsigned long long)g_gravacao[i].poll, g_gravacao[i].botoes);
+    fprintf(f, "\n");
+    fclose(f);
+    printf("[replay] gravado %s: %u transicao(oes), alvo %llu leituras\n",
+           caminho, g_gravacao_n, (unsigned long long)g_polls_controle);
+    fflush(stdout);
+    return 1;
+}
+
+uint64_t pif_polls_atuais(void) { return g_polls_controle; }
 
 /* WPJ2_STICK aceita "x,y" (por exemplo "80,0"). O analogico antes ficava
  * sempre centrado, deixando sem teste uma entrada que o jogo pode usar para
@@ -305,6 +366,14 @@ static void pif_process(int refresh) {
             if (rx >= 4) {
                 g_polls_controle++;
                 uint16_t b = botoes_agora();
+                /* Gravar AQUI, e nao em pif_set_buttons.
+                 *
+                 * Este e o unico ponto por onde passa toda entrada, venha do
+                 * teclado ou de um roteiro, e o indice de leitura ja esta
+                 * correto. Gravando na tecla, uma sessao que comecasse de uma
+                 * reproducao registraria so o que fosse digitado por cima e
+                 * perderia o roteiro que a trouxe ate ali. */
+                pif_gravar_transicao(b);
                 /* Registrar por MUDANCA, nao pelas primeiras N leituras. O
                  * limite antigo se esgotava no boot e nada aparecia quando a
                  * pessoa apertava uma tecla no titulo, minutos depois - que e

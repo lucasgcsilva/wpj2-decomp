@@ -51,11 +51,110 @@ void func_80096B38(uint8_t* rdram, recomp_context* ctx) {
  * usado. A busca por prefixo mantém esta rota barata. */
 void func_80090E58__replaced(uint8_t* rdram, recomp_context* ctx);
 void func_80090E58(uint8_t* rdram, recomp_context* ctx) {
+    /* Nao compor aqui.
+     *
+     * Chegou a haver uma chamada a legendas_compor_acentos() neste ponto, na
+     * suposicao de que o acento sumia por questao de momento - a fonte seria
+     * recarregada entre a composicao e o desenho. Nao era isso: compor no
+     * instante exato do desenho nao mudou nada na tela.
+     *
+     * O teste de vandalismo depois provou por que. Encher a letra 'a' nas
+     * tabelas apontadas por D_8015F810 e companhia nao alterou uma unica letra
+     * exibida. O texto desta tela NAO e desenhado a partir delas. Enquanto a
+     * fonte de verdade nao for localizada, compor por caractere so gastaria
+     * tempo - parece_fonte custa dezenas de leituras e roda uma vez por
+     * caractere. */
     uint32_t args = (uint32_t)ctx->r4;
     uint32_t args_phys = args & 0x1FFFFFFFu;
     if (args_phys + 4u <= 0x00400000u) {
         uint32_t source = (uint32_t)MEM_W(0, (gpr)(int32_t)args);
         legendas_substituir_recurso(rdram, source);
+        /* Despejo em hexadecimal da cadeia que o formatador vai consumir.
+         *
+         * Existe porque o 'a' agudo saiu em branco na tela mesmo com o glifo
+         * comprovadamente certo nas tres tabelas de fonte. Duas causas
+         * explicariam isso e elas exigem respostas opostas: ou o byte da
+         * composta nem chega aqui - e o defeito esta na substituicao de texto
+         * - ou chega e o motor recusa desenha-lo, e o defeito e a escolha do
+         * codigo. Ver o byte cru resolve sem mais palpite.
+         *
+         * Sai so para cadeias que contenham algum dos codigos que usamos, e
+         * poucas vezes, para nao inundar o log. */
+        /* Sonda de codigos aceitos pelo motor de texto.
+         *
+         * O despejo acima provou que 0x5B chega intacto ao formatador e mesmo
+         * assim nada e desenhado - logo o motor filtra por codigo, e a lista
+         * de aceitos e desconhecida. Descobri-la um codigo por execucao seria
+         * lento; esta sonda troca a cadeia inteira por uma fileira de
+         * candidatos e responde numa unica passada, olhando a tela.
+         *
+         * O primeiro byte e 'A', que sabidamente desenha. Ele e o controle: se
+         * nem ele aparecer, o problema nao e a lista de aceitos e sim esta
+         * sonda. Cabe em 14 bytes, o tamanho da cadeia substituida. */
+        if (getenv("WPJ2_SONDA_CODIGOS")) {
+            /* UMA vez, e nao a cada chamada.
+             *
+             * O formatador e chamado por CARACTERE, com o ponteiro andando um
+             * byte a cada vez - visivel no despejo: 0x2B1F10, 11, 12... Sem
+             * esta trava a sonda reescrevia a partir de cada posicao e enchia
+             * o buffer inteiro de 'A'. */
+            static int sondado = 0;
+            uint32_t phys = source & 0x1FFFFFFFu;
+            if (!sondado && phys && phys < 0x00800000u) {
+                int tem = 0;
+                for (uint32_t i = 0; i < 32u; i++) {
+                    uint8_t v = rdram[(phys + i) ^ 3u];
+                    if (!v) break;
+                    if (v == 0x5Bu) tem = 1;
+                }
+                if (tem) {
+                    /* Segunda rodada. A primeira mostrou que 0x5B..0x60 e
+                     * 0x7B..0x7E saem em branco, mas 0x23 e 0x24 desenham -
+                     * o motor parece aceitar 0x20..0x5A e 0x61..0x7A. Estes
+                     * sao os demais simbolos dessa faixa que o portugues nao
+                     * usa; confirmando-os, fecha-se a lista de destinos. */
+                    static const uint8_t sonda[] = {
+                        'A', 0x25, 0x26, 0x2A, 0x2B, 0x2F, 0x3B,
+                        0x3C, 0x3D, 0x3E, 0x40, 0x28, 0x29, 0x00
+                    };
+                    sondado = 1;
+                    for (uint32_t i = 0; i < sizeof(sonda); i++)
+                        rdram[(phys + i) ^ 3u] = sonda[i];
+                }
+            }
+        }
+        if (getenv("WPJ2_DESPEJO_TEXTO")) {
+            static unsigned emitidos;
+            uint32_t phys = source & 0x1FFFFFFFu;
+            if (phys && phys < 0x00800000u && emitidos < 12u) {
+                int interessante = 0;
+                for (uint32_t i = 0; i < 64u; i++) {
+                    uint8_t v = rdram[(phys + i) ^ 3u];
+                    if (!v) break;
+                    if (v == 0x5Bu || v == 0x5Cu || v == 0x5Du || v == 0x5Eu ||
+                        v == 0x5Fu || v == 0x60u || v == 0x7Bu || v == 0x7Cu ||
+                        v == 0x7Du || v == 0x7Eu || v == 0x23u || v == 0x24u)
+                        interessante = 1;
+                }
+                if (interessante) {
+                    emitidos++;
+                    printf("[texto] 0x%06X:", phys);
+                    for (uint32_t i = 0; i < 48u; i++) {
+                        uint8_t v = rdram[(phys + i) ^ 3u];
+                        if (!v) break;
+                        printf(" %02X", v);
+                    }
+                    printf("\n         ");
+                    for (uint32_t i = 0; i < 48u; i++) {
+                        uint8_t v = rdram[(phys + i) ^ 3u];
+                        if (!v) break;
+                        printf("%c", (v >= 0x20u && v < 0x7Fu) ? (char)v : '.');
+                    }
+                    printf("\n");
+                    fflush(stdout);
+                }
+            }
+        }
     }
     func_80090E58__replaced(rdram, ctx);
 }
@@ -172,6 +271,7 @@ static uint32_t rdram32(uint8_t* rdram, uint32_t phys) {
 }
 
 void func_80090784(uint8_t* rdram, recomp_context* ctx) {
+    legendas_conferir_marca(rdram, "90784-plotador");
     uint32_t a0 = (uint32_t)ctx->r4;
     uint32_t a1 = (uint32_t)ctx->r5;
     uint32_t base = kseg0((uint32_t)ctx->r6);
@@ -187,6 +287,36 @@ void func_80090784(uint8_t* rdram, recomp_context* ctx) {
        0x400 esta ativo e byte; caso contrario e meio-pixel de 16 bits. A
        versao anterior listava os dois destinos possiveis e podia atribuir uma
        chamada ao atlas embora ela tenha escrito no outro. */
+    /* Histograma de chamadores, sem filtro de destino.
+     *
+     * O contador antigo so registrava escritas no atlas 0x802CEF20 e devolveu
+     * zero, o que nao significa que o plotador esteja parado - significa que
+     * ele escreve noutro lugar, o framebuffer. Como ja eliminamos
+     * func_80094230 (nenhuma chamada com codigo de caractere) e a fonte 8x8
+     * (vandalismo sem efeito), quem chama func_80090784 de fato e a pergunta
+     * que resta. Contar por pai responde direto. */
+    {
+        #define PAIS_MAX 16
+        static uint32_t pais[PAIS_MAX];
+        static uint64_t pais_n[PAIS_MAX];
+        static unsigned n_pais = 0;
+        uint32_t pai = trace_last_func();
+        unsigned i;
+        for (i = 0; i < n_pais; i++) if (pais[i] == pai) break;
+        if (i == n_pais && n_pais < PAIS_MAX) { pais[n_pais++] = pai; pais_n[i] = 0; }
+        if (i < PAIS_MAX) pais_n[i]++;
+        if (getenv("WPJ2_PAIS_PLOTADOR")) {
+            static unsigned periodo = 0;
+            if ((periodo++ % 200000u) == 0u) {
+                printf("[plot] chamadores de func_80090784:");
+                for (unsigned k = 0; k < n_pais; k++)
+                    printf(" func_%08X=%llu", pais[k],
+                           (unsigned long long)pais_n[k]);
+                printf("\n");
+                fflush(stdout);
+            }
+        }
+    }
     uint32_t addr = kseg0(base + offset * ((mode & 0x400u) ? 1u : 2u));
     if (texture_address(addr)) {
         g_raster_atlas_total++;
@@ -245,13 +375,71 @@ static texto_log_t g_texto_log[TEXTO_LOG_MAX];
 static uint32_t g_texto_chamadas = 0, g_texto_log_n = 0;
 
 void func_80094230(uint8_t* rdram, recomp_context* ctx) {
+    legendas_conferir_marca(rdram, "94230-entra");
     uint32_t a0 = (uint32_t)ctx->r4;
-    /* O primeiro argumento e um indice de objeto, nao um endereco. O corpo
-       multiplica-o por 12 e busca os pixels na tabela global 0x8015F880. */
+    /* O primeiro argumento e um indice de objeto, nao um endereco. O patch
+       ingles do Ryu converte ASCII em Shift-JIS e chega aqui com indices
+       truncados 0x1xx/0x2xx. Esse ramo usa 24 bytes por objeto e subtrai 0x1200;
+       portanto nao e a tabela ASCII de 12 bytes investigada antes. */
     uint32_t tabela = rdram32(rdram, 0x0015F880u) & 0x1FFFFFFFu;
     uint32_t fonte = tabela + a0 * 12u;
     uint16_t modo = rdram16(rdram, 0x0015B338u);
+    /* A recomposicao precisa ocorrer no instante do consumo: o carregador
+     * pode repor o banco entre cenas. O filtro interno reconhece somente os
+     * 14 indices reservados pela nossa codificacao PT-BR. */
+    legendas_compor_glifo_ryu(rdram, a0);
     g_texto_chamadas++;
+    /* Exportar a tabela VIVA, na primeira chamada, e nao no fim da execucao.
+     *
+     * A exportacao antiga, em hle_texto_report, lia o endereco guardado na
+     * primeira chamada mas so no encerramento - e a essa altura a regiao ja
+     * fora liberada e reaproveitada. O arquivo saia inteiro zerado e parecia
+     * indicar que a tabela nao era de glifos. Aqui ela ainda esta em uso. */
+    if (getenv("WPJ2_EXPORTAR_OBJETOS")) {
+        static int exportado = 0;
+        if (!exportado && tabela && tabela + 0x10000u <= 0x800000u) {
+            exportado = 1;
+            FILE* f = fopen("temp\\objetos_vivo.bin", "wb");
+            if (f) {
+                for (uint32_t i = 0; i < 0x10000u; i++)
+                    fputc(rdram[(tabela + i) ^ 3u], f);
+                fclose(f);
+                printf("[texto] tabela de objetos exportada viva de 0x%08X\n",
+                       0x80000000u | tabela);
+                fflush(stdout);
+            }
+        }
+    }
+    /* Contar separadamente as chamadas de GLIFO.
+     *
+     * Em wonder-source func_80094230 so desenha caractere quando arg0 < 0xFF;
+     * acima disso o corpo segue por outro ramo, de objeto. Todas as 24
+     * amostras que o log capturou tinham arg0 >= 0xFF, o que nao prova nada
+     * sobre o texto - prova apenas que as primeiras chamadas da execucao nao
+     * eram texto. Sem separar os dois casos nao da para saber se a caixa de
+     * dialogo passa por aqui. */
+    {
+        static uint64_t glifos = 0;
+        static unsigned mostrados = 0;
+        if (a0 < 0xFFu) {
+            glifos++;
+            if (mostrados < 24u) {
+                mostrados++;
+                printf("[glifo] a0=0x%02X '%c' tab=0x%08X byte0=0x%02X\n",
+                       a0, (a0 >= 0x20u && a0 < 0x7Fu) ? (char)a0 : '.',
+                       0x80000000u | tabela, rdram[fonte ^ 3u]);
+                fflush(stdout);
+            }
+        }
+        if (getenv("WPJ2_CONTAR_GLIFOS")) {
+            static unsigned periodo = 0;
+            if ((periodo++ % 3600u) == 0u) {
+                printf("[glifo] total com a0<0xFF: %llu de %u chamadas\n",
+                       (unsigned long long)glifos, g_texto_chamadas);
+                fflush(stdout);
+            }
+        }
+    }
     if (g_texto_log_n < TEXTO_LOG_MAX && fonte < 0x800000u) {
         g_texto_log[g_texto_log_n++] = (texto_log_t){
             trace_last_func(), a0, (uint32_t)ctx->r5, (uint32_t)ctx->r6,
@@ -457,7 +645,40 @@ static void copy_pi_logical(uint8_t* rdram, uint32_t dram, uint32_t cart_off,
     }
 }
 
+/* Spi_DecompressAsset - onde a fonte NASCE.
+ *
+ * Endereco 0x800BF0B4, tirado de tools/wonder-source/symbol_addrs.txt. A
+ * chamada esta em sys_main.c:
+ *
+ *     D_8015F874 = SysMem_HeapAllocMark(...);
+ *     Spi_DecompressAsset(D_8015F880, sp1DC, D_8015F874);
+ *
+ * ou seja o terceiro argumento e o destino da descompressao. A fonte esta
+ * comprimida na ROM e so existe descomprimida a partir daqui - por isso
+ * patchear a ROM nao adiantou, e por isso as tabelas que achavamos por
+ * assinatura eram copias dormentes: apagar as 256 celulas de 0x800E48B0 nao
+ * mudou um pixel do texto.
+ *
+ * Compor logo apos a descompressao pega o dado no unico instante em que ele
+ * comprovadamente existe e ainda nao foi consumido. */
+void func_800BF0B4__replaced(uint8_t* rdram, recomp_context* ctx);
+void func_800BF0B4(uint8_t* rdram, recomp_context* ctx) {
+    uint32_t destino = (uint32_t)ctx->r6;
+    func_800BF0B4__replaced(rdram, ctx);
+    if (getenv("WPJ2_TRACAR_SPI")) {
+        static unsigned n;
+        if (n++ < 24u) {
+            printf("[spi] descomprimiu para 0x%08X\n", destino);
+            fflush(stdout);
+        }
+    }
+    if (getenv("WPJ2_ACENTOS_LEGADO") &&
+        atoi(getenv("WPJ2_ACENTOS_LEGADO")) != 0)
+        compor_fonte32(rdram);
+}
+
 void func_800BD218(uint8_t* rdram, recomp_context* ctx) {
+    legendas_conferir_marca(rdram, "BD218-copia");
     uint32_t source = (uint32_t)ctx->r4;
     uint32_t target = (uint32_t)ctx->r5;
     uint32_t size = (uint32_t)ctx->r6;
@@ -466,6 +687,20 @@ void func_800BD218(uint8_t* rdram, recomp_context* ctx) {
     if (source < 0x04000000u && size != 0 && size <= 0x04000000u - source &&
         target_phys < 0x00800000u && size <= 0x00800000u - target_phys) {
         copy_cart_logical(rdram, target_phys, source, size);
+        /* Recompor DEPOIS de cada copia de recurso.
+         *
+         * Medicao que motivou isto: a marca que gravamos na fonte nao
+         * sobreviveu a nenhum de 52.800 quadros, embora a leitura de volta na
+         * mesma chamada funcionasse. Ou seja o jogo re-transfere a fonte
+         * continuamente e desfaz a acentuacao antes de desenhar.
+         *
+         * Este e o ponto certo para agir: logo apos a transferencia, com o
+         * dado recem-chegado. compor_fonte32 se localiza sozinha e revalida o
+         * 'A' antes de escrever, entao chamar aqui em toda copia e barato e
+         * nao arrisca escrever em recurso que nao seja fonte. */
+        if (getenv("WPJ2_ACENTOS_LEGADO") &&
+            atoi(getenv("WPJ2_ACENTOS_LEGADO")) != 0)
+            compor_fonte32(rdram);
         faixa_anotar(target_phys, size);
         text_rom_trace(source, target_phys, size, "resource");
         g_resource_rom_copies++;
@@ -1436,6 +1671,31 @@ static int deliver_rsp_task_done(uint8_t* rdram) {
 /* Entrega os eventos de hardware pendentes. Chamado de dois lugares: do laco do
    scheduler, quando nao ha nada pronto (que e quando um interrupt chegaria no
    hardware ocioso), e de um ponto de laco, quando o jogo gira sem ceder. */
+/* Alvo do turbo, em leituras de controle. Zero significa desligado.
+ *
+ * Indexar por leitura e nao por tempo e o que torna a reproducao repetivel: a
+ * n-esima leitura e sempre a n-esima leitura, enquanto "aos 21 segundos"
+ * escorrega conforme a carga do host. */
+static uint64_t g_alvo_turbo = 0;
+
+void hle_definir_alvo_turbo(uint64_t alvo) {
+    g_alvo_turbo = alvo;
+    if (alvo) {
+        printf("[replay] turbo ate a leitura %llu\n", (unsigned long long)alvo);
+        fflush(stdout);
+    }
+}
+
+int hle_turbo_ativo(void) {
+    if (!g_alvo_turbo) return 0;
+    if (pif_polls_atuais() < g_alvo_turbo) return 1;
+    printf("[replay] alvo alcancado na leitura %llu; velocidade normal\n",
+           (unsigned long long)pif_polls_atuais());
+    fflush(stdout);
+    g_alvo_turbo = 0;
+    return 0;
+}
+
 int hle_deliver_events(uint8_t* rdram) {
     /* O retrace tem uma taxa: 60 Hz. Sem esse portao o laco ocioso do scheduler
        entrega interrupcoes o mais rapido que o host consegue, e o jogo roda
@@ -1491,6 +1751,15 @@ int hle_deliver_events(uint8_t* rdram) {
          * for consumida. O prazo absoluto continua intacto - nada aqui adianta
          * o relogio de quadros. */
         if (rsp_woke) return rsp_woke;
+        /* Turbo da reproducao: enquanto nao chegamos ao ponto gravado, nao ha
+         * por que dormir. O prazo absoluto continua sendo respeitado logo
+         * abaixo, entao a ORDEM dos eventos nao muda - so a velocidade com que
+         * o tempo de parede e consumido. E o que permite refazer dez minutos
+         * de jogo em segundos para voltar a uma cena. */
+        if (hle_turbo_ativo()) {
+            g_poll_deadline = (double)now.QuadPart;
+            return rsp_woke;
+        }
         /* A resolucao foi fixada em 1 ms no inicio. Dormir apenas o inteiro
          * estritamente anterior ao prazo evita uma espera extra de 15,6 ms e
          * deixa o ultimo milissegundo para o proximo poll cooperativo. */
@@ -1547,6 +1816,26 @@ int hle_deliver_events(uint8_t* rdram) {
     /* Antes da entrega, e nao depois: assim o relatorio mostra o estado que o
        laco abaixo vai encontrar, incluindo o acumulo de pendentes. */
     pif_relatorio_periodico();
+    /* Tarde o bastante para a fonte ja ter sido carregada na RDRAM: um despejo
+       no primeiro quadro sairia todo zerado e pareceria "fonte sem glifos". */
+    /* O instante importa e muda conforme o que se investiga: cedo demais e a
+       fonte ainda nao carregou, tarde demais e a cena ja passou. Por ambiente
+       para nao recompilar a cada tentativa. */
+    {
+        static uint64_t quando = 0;
+        if (!quando) {
+            const char* e = getenv("WPJ2_DESPEJO_FONTE_RETRACE");
+            quando = e ? strtoull(e, NULL, 0) : 900ull;
+        }
+        if (g_retraces == quando) {
+            legendas_despejar_fonte(rdram);
+            legendas_procurar_glifo(rdram);
+        }
+    }
+    /* Mantido como controle legado e desligado por padrao. A rota T-En viva
+       e recomposta no wrapper de func_80094230, no instante do consumo. */
+    legendas_conferir_marca(rdram, "retrace-antes");
+    legendas_compor_acentos(rdram);
     /* A drenagem do SI subiu para antes do portao de 60 Hz, junto de SP/DP.
        O motivo esta la em cima; em resumo, pautar o barramento serial na taxa
        de video custava mais de trinta segundos numa leitura de Controller

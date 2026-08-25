@@ -198,6 +198,34 @@ void     pif_take_si_done(void);
 /* Sai a cada segundo pelo relogio, nao por leitura: continua reportando mesmo
    depois que o jogo para de perguntar pelo controle. */
 void     pif_relatorio_periodico(void);
+
+/* Despeja a tabela de glifos 8x8 como arte ASCII e um mapa de ocupacao.
+   Uma vez por execucao, sob WPJ2_DESPEJO_FONTE=1. */
+void     legendas_despejar_fonte(uint8_t* rdram);
+/* Procura na RDRAM o bitmap de uma letra recortada da tela. Livre de
+   atribuicao de chamador, que com fibers nao e confiavel. */
+void     legendas_procurar_glifo(uint8_t* rdram);
+
+/* Compoe as letras acentuadas a partir dos acentos que a fonte ja tem, e
+   instala os ordinais. Idempotente: so age quando a tabela ja esta na RDRAM,
+   e uma unica vez. Chamar de graca a cada retrace ate pegar. */
+void     legendas_compor_acentos(uint8_t* rdram);
+/* Fonte 8x12 de D_8015F880, que e a que o texto do jogo realmente usa. */
+void     compor_fonte12(uint8_t* rdram);
+int      legendas_codigo_composto(unsigned codigo);
+int      legendas_compor_glifo_ryu(uint8_t* rdram, uint32_t indice_objeto);
+/* Cerco: observa a marca em pontos ja instrumentados e registra entre quais
+   dois ela morre. Mede o intervalo em vez de supor o culpado. */
+void     legendas_conferir_marca(uint8_t* rdram, const char* ponto);
+
+/* --- Reproducao de entrada (substitui o savestate; ver pif.c) --- */
+void     pif_gravar_transicao(uint16_t b);
+int      pif_gravar_replay(const char* caminho);
+uint64_t pif_polls_atuais(void);
+/* Turbo: enquanto a contagem de leituras nao alcanca o alvo, o portao de 60 Hz
+   nao dorme. Zero desliga. */
+void     hle_definir_alvo_turbo(uint64_t alvo);
+int      hle_turbo_ativo(void);
 void     pif_set_buttons(uint16_t b);
 void     pif_set_script(const char* s);
 void     pif_set_poll_script(const char* s);
