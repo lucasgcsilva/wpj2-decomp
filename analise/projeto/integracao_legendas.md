@@ -300,8 +300,92 @@ correção global de `G_TEXTURE_OFF` recuperou o realce e a ordem visual sem
 redesenhar nada. `Day` e `Progress` continuam sendo pixels de uma imagem CI8
 dinâmica em torno de `0x80358F50`; traduzi-los nativamente permanece pendente.
 
-A tela seguinte (`Message Speed`/`Bird's Speed`) também é gráfica. Ambas
-permanecem pendentes até o hook no escritor da imagem dinâmica.
+A tela seguinte não pertence à mesma classe. `Message Speed`, `Bird's Speed`,
+`Fast` e `Slow` são cadeias textuais copiadas individualmente por
+`func_800BD218`: por exemplo, `0x68B924 → 0x80363D50`, sempre em um slot de 48
+bytes. O patch estático via apenas os 13 bytes de `Message Speed` e rejeitava
+`Velocidade da Mensagem`; o recurso vivo tinha capacidade de sobra.
+
+O hook de cópia agora informa explicitamente os 48 bytes ao interceptador e a
+substituição acontece antes da rasterização nativa. Validação visual mostrou
+`Velocidade da Mensagem`, `Velocidade do Bird`, `Rápido`, `Lento`, `Fim` e
+`Sair`, sem sobreposição de framebuffer e com os realces originais intactos.
+Somente `Day` e `Progress` continuam na classe pré-rasterizada.
+
+## Diálogos compostos após a formatação — 25/08/2026
+
+As capturas `f5_001` a `f5_005` mostraram uma classe diferente dos recursos
+completos: uma mesma fala alternava inglês, nome dinâmico e português. A ROM
+T-En guarda essas mensagens como fragmentos separados por controles, por
+exemplo `"The Doctor said " + E0/02 + "-san is from a" + quebra +
+"world I can't see."`. O patch estático só conseguia trocar os fragmentos que
+cabiam no espaço inglês; por isso a frase aparecia parcialmente traduzida.
+
+A correção não altera o bloco estrutural nem desenha sobre o framebuffer.
+Depois de `vsprintf`, em `func_80090E58`, o runtime percorre a cadeia já com
+`BEAN`, `Josette` e outros valores resolvidos, substitui pelo maior fragmento
+conhecido em cada posição e publica uma única cópia PT-BR na arena acima dos
+4 MB. Espaços nas bordas dos fragmentos são preservados mesmo quando a revisão
+do catálogo os omitiu, evitando concatenações como `queBEAN` e `Josettee`.
+
+Esse caminho fica deliberadamente restrito ao ponto posterior ao formatador.
+Executá-lo em `func_800319B0` ou `func_80096D40` faria o byte reservado ao
+glifo `ã` (`%`) voltar a ser interpretado como especificador e reproduziria o
+congelamento da thread principal.
+
+O teste `test_legendas_recursos` agora cobre deterministicamente as cinco
+mensagens observadas, inclusive a fala longa de Bird, nomes, quebras, espaços
+e bytes dos acentos. Build e teste passaram. Replays de menu e da animação
+posterior a `Fim` terminaram ativos em `11/24` e `1/1`; o segundo registrou
+4.156 tarefas gráficas sem prender a thread principal.
+
+### Controles de ação e consolidação de PT-BR — segunda validação
+
+As capturas seguintes revelaram comandos `E1 <cor>` / `E1 FF` ao redor de
+`"Yes"`, `Blue Button`, `R-Button`, `Pad` e equivalentes. Os controles já eram
+preservados em pares; o inglês persistia porque esses fragmentos não existiam
+no catálogo final. Foram acrescentados `Sim`, `Bom`, `Não`, `Errado`,
+`Botão Azul`, `Botão Verde`, `Botão R`, `Gatilho Z`, `Analógico 3D`,
+`controle` e conectivos próximos.
+
+Também ficou comprovado que uma mensagem longa pode chegar inteiramente em
+PT-BR e ainda permanecer dividida nos limites ingleses. O índice de tradução
+agora possui uma segunda busca pela representação PT-BR já codificada. Assim,
+fragmentos previamente substituídos são reconhecidos e copiados para uma única
+cadeia de arena, sem retradução. O teste unitário cobre uma fala totalmente
+PT-BR e uma instrução com quatro pares `E1`; ambos passaram.
+
+O perfil padrão mantém temporariamente a captura de RDRAM no F5. Ela só grava
+ao pressionar a tecla e permite verificar o recurso vivo se alguma rolagem
+ainda divergir.
+
+### Cobertura dos fragmentos e reflow — 25/08/2026
+
+As capturas seguintes provaram que a extração bruta continha `blue` e `green`
+em `0x00800AAD/0x00800AB9`, mas essas chaves curtas não haviam sido promovidas
+ao mapa ativo. O tamanho da cadeia não é um critério válido: opções, cores,
+botões e conectivos legítimos podem ter poucos bytes. A auditoria nova
+`src/scripts/auditar_cobertura_traducao.py` compara cada fonte do banco textual
+declarado pelo patch Ryu (`0x00800000..0x0081FFFF`) com o TSV ativo, preservando
+aspas e espaços estruturais. A primeira passagem encontrou 98 chaves; depois
+da promoção de palavras, ações, nomes e variantes com espaços, o resultado é
+**zero fonte extraída sem chave canônica**, com 5.886 chaves ativas.
+
+O lixo sobreposto das falas longas não vinha de uma tradução ausente. O dump
+da arena continha a frase correta, mas a linha PT-BR podia ficar mais larga em
+pixels que a inglesa. O motor fazia uma quebra automática e em seguida lia a
+quebra explícita herdada do inglês, executando duas rolagens sobre o mesmo
+framebuffer. Mensagens compostas agora têm suas quebras de layout recalculadas
+com margem de 38 glifos, depois de `vsprintf`; controles `E0/E1/E2` continuam
+no fluxo e ocupam largura zero. O teste compara o conteúdo ignorando apenas a
+posição das quebras, exige linhas de no máximo 38 glifos e passou.
+
+Essa substituição deve permanecer estritamente limitada à faixa de ROM
+`0x0068B8E0..0x0068BF48`. Aplicá-la genericamente em toda cópia de
+`func_800BD218` alcança recursos técnicos como `SPI1` e pode inserir bytes de
+glifo antes de eles atravessarem `printf`, reproduzindo o laço em `vsprintf`
+após `Fim`. O replay de regressão exige simultaneamente zero traduções de
+`SPI1`, avanço gráfico e os rótulos completos no menu.
 
 ## Segurança do patch estático e glifos que colidem com `printf`
 
@@ -315,3 +399,34 @@ Traduções que geram essa colisão não são mais gravadas no cartucho. Elas de
 ser aplicadas somente pelo interceptador do recurso vivo, depois da etapa de
 formatação. Não resolver isso duplicando `%`: recursos que passam por mais de
 um formatador voltariam a expor um `%` na passagem seguinte.
+
+### Proteção geral por fase — 25/08/2026
+
+Uma captura posterior mostrou que proteger apenas o patch estático ainda era
+insuficiente. A fala `Dr. Geppetto: ... listen very\ncarefully...` existia já
+traduzida em três cópias da RDRAM (`0x1705D1`, `0x2B5351` e `0x346CF1`) antes
+de chegar a `func_8008EDA4`. Nessas cópias, `atenção` continha o byte `0x25`
+do glifo `ã`; o formatador o lia como `%` e prendia a thread principal. A
+imagem congelava, enquanto a thread de áudio continuava normalmente.
+
+As APIs de recurso vivo agora distinguem explicitamente duas fases:
+
+- `legendas_*_antes_formatador` não escreve traduções que gerem colisão com
+  comandos de formato; registra `recurso_ptbr_adiado_formato` e conserva o
+  inglês estrutural;
+- os ganchos posteriores a `func_8008EDA4` aplicam a mesma entrada PT-BR já
+  codificada, quando `%` voltou a ser somente um glifo.
+
+A regra foi aplicada a todas as rotas precoces conhecidas
+(`func_80096B38`, `func_800319B0` e `func_80096D40`), não somente à fala que
+revelou o defeito. `func_80090E58` permanece como rota tardia. A cópia de slots
+do menu em `func_800BD218` também permanece tardia porque é rasterizada sem
+atravessar o formatador.
+
+O teste unitário reproduz a colisão com `It's morning...` / `É de manhã...`:
+exige origem inglesa intacta na fase precoce e o byte do glifo presente na
+fase tardia. No replay completo de 175 segundos, o ponto antigo parava em
+7.882 tarefas gráficas e `main_func=0x8008EDA4`; depois da correção chegou a
+10.127 tarefas, com a thread principal aguardando normalmente em
+`0x800CC98C`. O log confirmou tanto os adiamentos quanto traduções tardias da
+mesma sequência de Geppetto.

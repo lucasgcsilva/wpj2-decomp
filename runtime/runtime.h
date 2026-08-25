@@ -67,6 +67,9 @@ void     sched_pause_current(uint8_t* rdram);
 /* __osCleanupThread nunca volta ao chamador: apos remover a OSThread, o fiber
    correspondente tambem precisa deixar de poder ser retomado. */
 void     sched_terminate_current(uint8_t* rdram);
+/* osDestroyThread: remove de forma limitada das filas de escalonamento e da
+ * lista ativa. Retorna para o chamador quando o alvo nao e a thread atual. */
+void     sched_destroy_thread(uint8_t* rdram, uint32_t thread);
 uint64_t sched_switches(void);
 uint64_t sched_dispatch_calls(void);
 uint64_t sched_empty_dispatch(void);

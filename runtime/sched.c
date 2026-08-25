@@ -93,6 +93,51 @@ static void enqueue_by_priority(uint8_t* rdram, uint32_t queue_addr, uint32_t th
     wr32(rdram, pred + TH_NEXT, thread);
 }
 
+/* Remove `thread` de uma lista encadeada cujo endereco da cabeca funciona
+ * como no falso. O limite nao e uma aproximacao funcional: a ROM usa menos de
+ * 32 OSThreads. Ele apenas impede que uma lista acidentalmente ciclica prenda
+ * a thread do jogo para sempre. */
+static int unlink_bounded(uint8_t* rdram, uint32_t head_addr, uint32_t thread,
+                          uint32_t next_offset) {
+    uint32_t prev = head_addr;
+    uint32_t cur = rd32(rdram, head_addr);
+    for (unsigned i = 0; cur && i < MAX_THREADS * 2u; i++) {
+        if (cur == thread) {
+            wr32(rdram, prev + (prev == head_addr ? 0u : next_offset),
+                 rd32(rdram, cur + next_offset));
+            return 1;
+        }
+        prev = cur;
+        cur = rd32(rdram, cur + next_offset);
+    }
+    return 0;
+}
+
+void sched_destroy_thread(uint8_t* rdram, uint32_t thread) {
+    uint32_t current = sched_current();
+    if (!thread) thread = current;
+    if (!thread) return;
+
+    uint16_t state = (uint16_t)MEM_HU(0, (gpr)(int32_t)(thread + TH_STATE));
+    uint32_t queue = rd32(rdram, thread + TH_QUEUE);
+    if (state != OS_STATE_RUNNING && queue)
+        unlink_bounded(rdram, queue, thread, TH_NEXT);
+    unlink_bounded(rdram, ADDR_ACTIVE_QUEUE, thread, TH_TLNEXT);
+    wr16(rdram, thread + TH_STATE, OS_STATE_STOPPED);
+    wr32(rdram, thread + TH_NEXT, 0);
+    wr32(rdram, thread + TH_TLNEXT, 0);
+
+    for (int i = 0; i < MAX_THREADS; i++) {
+        if (g_slots[i].started && g_slots[i].thread == thread) {
+            g_slots[i].finished = 1;
+            g_slots[i].parked_on = 0;
+            break;
+        }
+    }
+
+    if (thread == current) sched_terminate_current(rdram);
+}
+
 static sched_slot_t* slot_for(uint32_t thread) {
     sched_slot_t* free_slot = NULL;
     for (int i = 0; i < MAX_THREADS; i++) {
@@ -276,7 +321,14 @@ static void CALLBACK scheduler_loop(void* param) {
             SwitchToFiber(g_main_fiber);
             continue;
         }
-        if (s->finished) continue;      /* thread morta que voltou para a fila */
+        if (s->finished) {
+            /* Pools do jogo reutilizam a mesma estrutura OSThread. Se um
+             * objeto destruido reapareceu PRONTO na fila, osCreateThread ja o
+             * inicializou de novo: descarte o fiber antigo e crie outro a
+             * partir do novo contexto salvo. */
+            if (s->fiber) DeleteFiber(s->fiber);
+            memset(s, 0, sizeof(*s));
+        }
 
         if (!s->started) {
             s->thread   = head;

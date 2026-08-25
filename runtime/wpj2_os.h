@@ -48,7 +48,9 @@
 
 /* --- globais do SO --- */
 #define ADDR_RUN_QUEUE        0x800ECD08u   /* argumento de __osPopThread     */
+#define ADDR_ACTIVE_QUEUE     0x800ECD0Cu   /* cabeca da lista global ativa   */
 #define ADDR_RUNNING_THREAD   0x800ECD10u   /* recebe o resultado do pop      */
+#define TH_TLNEXT      0x00C   /* proxima na lista global de OSThreads       */
 #define ADDR_GLOBAL_INT_MASK  0x800ECC4Cu
 #define ADDR_RCP_IM_TABLE     0x800EFEE0u
 

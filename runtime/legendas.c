@@ -16,22 +16,191 @@
 #define MAX_TEXT             511u
 #define HASH_BUCKETS         8191u
 
+/* ---------------------------------------------------------------------------
+ * Arena de realocacao (experimental, WPJ2_REALOCAR=1)
+ *
+ * O teto de traducao nao vem do jogo: vem de escrevermos a cadeia PT-BR EM
+ * CIMA da inglesa, no mesmo endereco. Quem nao cabe fica em ingles -- 1506 das
+ * 1687 recusas estao na regiao realocada do patch Ryu (0x800000+), onde nao ha
+ * folga adjacente para tomar.
+ *
+ * Existe memoria sobrando, e muita. O IPL3 publica osMemSize = 4 MB (sem pak
+ * de expansao), entao o heap do jogo nunca passa de 0x00400000. O runtime, por
+ * outro lado, mapeia 8 MB de RDRAM. Os 4 MB superiores sao terra de ninguem:
+ * nenhum alocador do jogo os conhece.
+ *
+ * A ideia e nao mais escrever por cima. Quando a traducao nao cabe, ela vai
+ * para um slot nessa faixa e nos reescrevemos o PONTEIRO que o carregador
+ * publicou. O formatador, a fonte e a digitacao progressiva continuam sendo do
+ * jogo -- ele so passa a ler de outro endereco.
+ *
+ * A pergunta que decide tudo, e que este codigo existe para responder: o
+ * consumidor aceita um ponteiro fora dos 4 MB? Se ele fizer qualquer
+ * aritmetica de base/offset sobre o endereco do recurso, nao aceita, e o
+ * caminho e encurtar os textos. Por isso vem atras de chave de ambiente e com
+ * contadores.
+ * ------------------------------------------------------------------------- */
+#define ARENA_BASE           0x00400000u /* logo acima do que o jogo enxerga */
+#define ARENA_BYTES          0x00300000u /* 3 MB; sobra folga ate os 8 MB    */
+#define ARENA_ANEL_SLOTS     64u         /* textos com controles E0/E1/E2    */
+#define ARENA_ANEL_BYTES     1024u
+
 typedef struct {
     char* source;
     char* translated;
+    char* translated_encoded;
     uint16_t source_len;
+    uint16_t translated_len;
     int next;
+    int next_translated;
+    /* Slot estavel desta entrada na arena. Uma cadeia sem controles gera
+     * sempre os mesmos bytes, entao vale traduzir uma vez e reapontar sempre
+     * para o mesmo lugar -- barato e sem reciclagem. 0 = ainda nao alocado. */
+    uint32_t slot_phys;
+    uint32_t slot_bytes;
 } subtitle_entry_t;
 
 static subtitle_entry_t g_entries[MAX_ENTRIES];
 static size_t g_entry_count;
 static int g_prefix_buckets[HASH_BUCKETS];
+static int g_translated_buckets[HASH_BUCKETS];
 static int g_initialized;
 static int g_enabled;
 static FILE* g_trace;
 static uint32_t g_trace_lines;
 static subtitle_entry_t* find_entry(const char* source);
+static subtitle_entry_t* find_entry_longest_prefix(const char* source,
+                                                    size_t available);
+static subtitle_entry_t* find_entry_longest_translated_prefix(
+    const char* source, size_t available);
 static void trace_source(const char* status, const char* source);
+
+/* O formatador do Ryu aceita linhas inglesas muito próximas da borda. A
+ * tradução pode conservar exatamente o mesmo número de caracteres e ainda
+ * ficar mais larga em pixels ("Behind" -> "Atrás", por exemplo). Nesse caso
+ * o motor faz uma quebra automática e logo depois encontra a quebra explícita
+ * do recurso: são duas rolagens sobre o mesmo framebuffer, deixando letras
+ * antigas misturadas às novas.
+ *
+ * Mensagens compostas já chegam aqui depois de vsprintf. Refluí-las numa
+ * cadeia única, usando uma margem conservadora de 38 glifos, mantém controles
+ * E0/E1/E2 intactos e deixa a própria rotina de texto executar cada rolagem
+ * uma única vez. As quebras do patch inglês são de layout, não de parágrafo,
+ * portanto entram como espaços e são recalculadas. */
+#define DIALOG_LINE_GLYPHS 38u
+static size_t reflow_dialogue(unsigned char* text, size_t length,
+                              size_t capacity) {
+    unsigned char tmp[SCRATCH_SLOT_BYTES];
+    size_t out = 0, line = 0, last_space = (size_t)-1;
+
+    for (size_t in = 0; in < length; in++) {
+        unsigned char b = text[in];
+        if (b >= 0xE0u && b <= 0xE2u && in + 1u < length) {
+            if (out + 2u >= capacity) return length;
+            tmp[out++] = b;
+            tmp[out++] = text[++in];
+            continue;
+        }
+        if (b == '\r') continue;
+        if (b == '\n') b = ' ';
+        if (b == ' ') {
+            if (!out || tmp[out - 1u] == ' ' || tmp[out - 1u] == '\n')
+                continue;
+            if (out + 1u >= capacity) return length;
+            last_space = out;
+            tmp[out++] = ' ';
+            line++;
+            continue;
+        }
+        if (out + 1u >= capacity) return length;
+        tmp[out++] = b;
+        line++;
+        if (line > DIALOG_LINE_GLYPHS && last_space != (size_t)-1) {
+            tmp[last_space] = '\n';
+            line = 0;
+            for (size_t p = last_space + 1u; p < out; p++) {
+                if (tmp[p] >= 0xE0u && tmp[p] <= 0xE2u && p + 1u < out) {
+                    p++;
+                } else if (tmp[p] >= 0x20u) {
+                    line++;
+                }
+            }
+            last_space = (size_t)-1;
+        }
+    }
+    while (out && (tmp[out - 1u] == ' ' || tmp[out - 1u] == '\n')) out--;
+    memcpy(text, tmp, out);
+    return out;
+}
+
+/* Estado da arena. Contadores existem para o veredito nao depender de
+ * impressao: sem eles, "nao mudou nada na tela" nao distingue "a realocacao
+ * nao rodou" de "rodou e o consumidor ignorou". */
+static int      g_realocar = -1;      /* -1 = ainda nao lido do ambiente */
+static uint32_t g_arena_topo = ARENA_BASE + ARENA_ANEL_SLOTS * ARENA_ANEL_BYTES;
+static uint32_t g_arena_anel = 0;
+static uint64_t g_realoc_fixas = 0, g_realoc_anel = 0, g_realoc_sem_espaco = 0;
+
+#define COMPOSTO_CACHE 256u
+typedef struct {
+    uint32_t origem_phys;
+    uint32_t hash;
+    uint32_t slot_phys;
+} composto_cache_t;
+static composto_cache_t g_composto_cache[COMPOSTO_CACHE];
+static uint32_t g_composto_cache_n = 0;
+
+/* 0 = desligado; 1 = so o que nao cabe; 2 = TUDO, inclusive o que caberia.
+ *
+ * O modo 2 existe por causa de um problema de medicao. A pergunta e se o
+ * consumidor aceita um ponteiro fora dos 4 MB, mas as cadeias que estouram o
+ * orcamento estao em cenas fundas do jogo -- caras de alcancar e dificeis de
+ * conferir. As que CABEM aparecem logo na abertura e eu sei como devem estar
+ * escritas na tela. Realocando justamente essas, o teste vira: a intro
+ * continua legivel? Se sim, o endereco nao importa para o consumidor e o teto
+ * cai; se a tela quebra, a realocacao esta descartada. Diagnostico apenas. */
+static int realocacao_ligada(void) {
+    if (g_realocar < 0) {
+        const char* e = getenv("WPJ2_REALOCAR");
+        g_realocar = (e && *e) ? atoi(e) : 0;
+        if (g_realocar < 0) g_realocar = 0;
+    }
+    return g_realocar;
+}
+
+/* Slot permanente, um por entrada traduzida. */
+static uint32_t arena_alocar_fixo(size_t bytes) {
+    uint32_t alinhado = ((uint32_t)bytes + 4u) & ~3u;
+    if (g_arena_topo + alinhado > ARENA_BASE + ARENA_BYTES) {
+        g_realoc_sem_espaco++;
+        return 0;
+    }
+    uint32_t p = g_arena_topo;
+    g_arena_topo += alinhado;
+    g_realoc_fixas++;
+    return p;
+}
+
+/* Anel para texto que carrega controles E0/E1/E2: os codigos vem da ocorrencia,
+ * nao da entrada, entao duas aparicoes da mesma cadeia inglesa podem produzir
+ * bytes diferentes e um slot fixo por entrada seria errado. O jogo digita a
+ * mensagem e a descarta; 64 slots cobrem folgadamente o que fica vivo. */
+static uint32_t arena_alocar_anel(void) {
+    uint32_t p = ARENA_BASE + g_arena_anel * ARENA_ANEL_BYTES;
+    g_arena_anel = (g_arena_anel + 1u) % ARENA_ANEL_SLOTS;
+    g_realoc_anel++;
+    return p;
+}
+
+void legendas_relatorio_arena(void) {
+    if (!realocacao_ligada()) return;
+    fprintf(stderr,
+            "[arena] slots fixos=%llu anel=%llu sem_espaco=%llu topo=0x%06X\n",
+            (unsigned long long)g_realoc_fixas,
+            (unsigned long long)g_realoc_anel,
+            (unsigned long long)g_realoc_sem_espaco,
+            g_arena_topo);
+}
 
 static void decode_escapes(char* text) {
     char* read = text;
@@ -1629,7 +1798,10 @@ static uint32_t prefix_key_cart(const uint8_t* cart, size_t pos) {
 static void init_once(void) {
     if (g_initialized) return;
     g_initialized = 1;
-    for (size_t i = 0; i < HASH_BUCKETS; i++) g_prefix_buckets[i] = -1;
+    for (size_t i = 0; i < HASH_BUCKETS; i++) {
+        g_prefix_buckets[i] = -1;
+        g_translated_buckets[i] = -1;
+    }
     const char* configured = getenv("WPJ2_LEGENDAS");
     if (!configured || !*configured || !strcmp(configured, "0")) return;
     const char* path = !strcmp(configured, "1") ? "textos\\traducao_ptbr.tsv" : configured;
@@ -1661,9 +1833,19 @@ static void init_once(void) {
         entry->translated = _strdup(tab);
         if (!entry->source || !entry->translated) break;
         entry->source_len = (uint16_t)source_len;
+        {
+            char encoded[SCRATCH_SLOT_BYTES];
+            size_t encoded_len = make_ascii(encoded, sizeof(encoded), tab);
+            entry->translated_encoded = _strdup(encoded);
+            if (!entry->translated_encoded || encoded_len > UINT16_MAX) break;
+            entry->translated_len = (uint16_t)encoded_len;
+        }
         uint32_t bucket = prefix_key_text(entry->source) % HASH_BUCKETS;
         entry->next = g_prefix_buckets[bucket];
         g_prefix_buckets[bucket] = (int)g_entry_count;
+        bucket = prefix_key_text(entry->translated_encoded) % HASH_BUCKETS;
+        entry->next_translated = g_translated_buckets[bucket];
+        g_translated_buckets[bucket] = (int)g_entry_count;
         g_entry_count++;
     }
     fclose(file);
@@ -1675,11 +1857,20 @@ static void init_once(void) {
     }
 }
 
-int legendas_substituir_recurso(uint8_t* rdram, uint32_t pointer) {
+/* `novo_ponteiro` nao-nulo autoriza a realocacao: quando a traducao nao couber
+ * no lugar, ela e escrita num slot da arena e o endereco virtual do slot sai
+ * por ali, para o chamador reapontar quem consome o recurso. Com NULL o
+ * comportamento e o historico -- ou cabe no lugar, ou fica em ingles. */
+static int substituir_interno(uint8_t* rdram, uint32_t pointer,
+                              uint32_t* novo_ponteiro,
+                              size_t capacidade_explicita,
+                              int antes_formatador) {
     init_once();
     if (!g_enabled) return 0;
 
     uint32_t phys = pointer & 0x1FFFFFFFu;
+    /* Um ponteiro que ja esta na arena e obra nossa de uma passagem anterior:
+     * o texto ali ja esta em PT-BR e nao deve ser reprocessado. */
     if (phys >= RDRAM_LIMIT) return 0;
 
     char source[MAX_TEXT + 1];
@@ -1728,9 +1919,34 @@ int legendas_substituir_recurso(uint8_t* rdram, uint32_t pointer) {
     subtitle_entry_t* entry = find_entry(source);
     if (!entry) return 0;
 
+    /* Regra global de fase.
+     *
+     * O patch Ryu usa '%' como comando em func_8008EDA4, enquanto a fonte
+     * PT-BR reutiliza o mesmo byte para o glifo 'ã'. Qualquer substituição
+     * anterior ao formatador transformaria a letra em especificador e poderia
+     * prender o laço interno, parando vídeo/input enquanto o áudio continua.
+     * Não tente escapar com "%%": há recursos que passam pelo formatador mais
+     * de uma vez. A única solução estável é adiar a troca para 80090E58, que é
+     * posterior à formatação. */
+    if (antes_formatador && cart_text_has_format_collision(entry->translated)) {
+        trace_source("recurso_ptbr_adiado_formato", source);
+        return 0;
+    }
+
     char translated[SCRATCH_SLOT_BYTES];
     size_t translated_n = make_ascii(translated, sizeof(translated), entry->translated);
     size_t encoded_n = translated_n + control_n * 2u;
+
+    /* O carregador pode ter preparado um slot ao encontrar uma cadeia longa,
+     * antes de func_800319B0 publicar a string individual. Nesse segundo
+     * ponto, nao volte a considerar zeros adjacentes como capacidade: alem de
+     * ignorar a arena ja validada, isso recolocaria o risco de invadir o
+     * registro seguinte. Controles usam o anel e nao podem compartilhar cache. */
+    if (novo_ponteiro && control_n == 0 && entry->slot_phys) {
+        *novo_ponteiro = 0x80000000u | entry->slot_phys;
+        trace_source("recurso_ptbr_arena_cache", source);
+        return 1;
+    }
 
     /* Capacidade real, nao comprimento da cadeia inglesa.
      *
@@ -1757,13 +1973,51 @@ int legendas_substituir_recurso(uint8_t* rdram, uint32_t pointer) {
     while (folga < FOLGA_MAX && phys + raw_n + folga < RDRAM_LIMIT &&
            rd8(rdram, phys + (uint32_t)(raw_n + folga)) == 0)
         folga++;
-    size_t capacidade = folga ? raw_n + folga - 1u : raw_n;
+    size_t capacidade = capacidade_explicita
+                      ? capacidade_explicita - 1u
+                      : (folga ? raw_n + folga - 1u : raw_n);
 
-    if (!translated_n || encoded_n > capacidade) {
-        trace_source("recurso_ptbr_longo", source);
-        return 0;
+    if (!translated_n) return 0;
+
+    /* Destino: por padrao o proprio recurso. So sai do lugar quando nao cabe
+     * e a realocacao esta autorizada. */
+    uint32_t destino = phys;
+    int realocado = 0;
+
+    int forcar = novo_ponteiro && realocacao_ligada() >= 2;
+    if (encoded_n > capacidade || forcar) {
+        if (!novo_ponteiro || !realocacao_ligada()) {
+            trace_source("recurso_ptbr_longo", source);
+            return 0;
+        }
+        /* Sem controles, a entrada sempre gera os mesmos bytes: um slot fixo
+         * serve para sempre e as chamadas seguintes nem reescrevem. */
+        if (control_n == 0 && entry->slot_phys) {
+            *novo_ponteiro = 0x80000000u | entry->slot_phys;
+            trace_source("recurso_ptbr_arena_cache", source);
+            return 1;
+        }
+        size_t precisa = encoded_n + 1u;
+        if (control_n == 0) {
+            destino = arena_alocar_fixo(precisa);
+            if (destino) {
+                entry->slot_phys = destino;
+                entry->slot_bytes = (uint32_t)precisa;
+            }
+        } else if (precisa <= ARENA_ANEL_BYTES) {
+            destino = arena_alocar_anel();
+        } else {
+            destino = 0;
+        }
+        if (!destino) {
+            trace_source("recurso_ptbr_longo", source);
+            return 0;
+        }
+        capacidade = encoded_n;      /* o slot foi dimensionado para caber */
+        realocado = 1;
+        *novo_ponteiro = 0x80000000u | destino;
     }
-    if (encoded_n > raw_n) {
+    if (!realocado && encoded_n > raw_n) {
         /* Marcado a parte para dar para medir o ganho no legendas_rota.tsv:
          * estas so cabem por causa do enchimento. */
         trace_source("recurso_ptbr_folga", source);
@@ -1797,12 +2051,12 @@ int legendas_substituir_recurso(uint8_t* rdram, uint32_t pointer) {
     for (size_t pos = 0; pos <= translated_n; pos++) {
         for (size_t i = 0; i < control_n; i++) {
             if (controls[i].translated_offset == pos) {
-                wr8(rdram, phys + (uint32_t)out++, controls[i].code);
-                wr8(rdram, phys + (uint32_t)out++, controls[i].argument);
+                wr8(rdram, destino + (uint32_t)out++, controls[i].code);
+                wr8(rdram, destino + (uint32_t)out++, controls[i].argument);
             }
         }
         if (pos < translated_n)
-            wr8(rdram, phys + (uint32_t)out++, (uint8_t)translated[pos]);
+            wr8(rdram, destino + (uint32_t)out++, (uint8_t)translated[pos]);
     }
     /* Ate o MAIOR entre os dois, nao ate raw_n.
      *
@@ -1811,10 +2065,204 @@ int legendas_substituir_recurso(uint8_t* rdram, uint32_t pointer) {
      * O texto vazaria para o que viesse depois. Pelo maior, escreve-se o NUL
      * em `out` e, quando a traducao e mais curta, ainda se limpa o resto do
      * ingles original - que era o proposito inicial deste laco. */
-    size_t limite_zeros = encoded_n > raw_n ? encoded_n : raw_n;
+    /* Realocado, o ingles original fica intocado -- ninguem mais o le, e
+     * apaga-lo so destruiria a chave que reconhece o recurso numa proxima
+     * passagem. Basta terminar a cadeia nova. */
+    size_t limite_zeros = realocado ? encoded_n
+                        : (encoded_n > raw_n ? encoded_n : raw_n);
     while (out <= limite_zeros)
-        wr8(rdram, phys + (uint32_t)out++, 0);
-    trace_source("recurso_ptbr_nativo", source);
+        wr8(rdram, destino + (uint32_t)out++, 0);
+    trace_source(realocado ? "recurso_ptbr_arena" : "recurso_ptbr_nativo", source);
+    return 1;
+}
+
+int legendas_substituir_recurso(uint8_t* rdram, uint32_t pointer) {
+    return substituir_interno(rdram, pointer, NULL, 0, 0);
+}
+
+int legendas_substituir_recurso_antes_formatador(uint8_t* rdram,
+                                                 uint32_t pointer) {
+    return substituir_interno(rdram, pointer, NULL, 0, 1);
+}
+
+int legendas_substituir_recurso_com_capacidade(uint8_t* rdram, uint32_t pointer,
+                                               uint32_t slot_bytes) {
+    if (!slot_bytes) return 0;
+    return substituir_interno(rdram, pointer, NULL, slot_bytes, 0);
+}
+
+int legendas_realocar_recurso(uint8_t* rdram, uint32_t pointer,
+                              uint32_t* novo_ponteiro) {
+    *novo_ponteiro = 0;
+    return substituir_interno(rdram, pointer, novo_ponteiro, 0, 0);
+}
+
+int legendas_realocar_recurso_antes_formatador(uint8_t* rdram,
+                                               uint32_t pointer,
+                                               uint32_t* novo_ponteiro) {
+    return substituir_interno(rdram, pointer, novo_ponteiro, 0, 1);
+}
+
+/* O patch Ryu guarda certos dialogos como uma unica cadeia estrutural, mas o
+ * catalogo foi extraido por fragmentos. Exemplo:
+ *
+ *   "The Doctor said " E0 02 "-san is from a" \n
+ *   "world I can't see."
+ *
+ * A busca exata da mensagem inteira nunca encontra uma entrada. Traduzir os
+ * fragmentos no cartucho tambem e insuficiente: os que crescem sao recusados e
+ * a tela fica metade EN/metade PT. Esta rota recompõe a mensagem completa numa
+ * arena, sem mover os controles nem alterar o bloco original. */
+int legendas_realocar_recurso_composto(uint8_t* rdram, uint32_t pointer,
+                                       uint32_t* novo_ponteiro) {
+    init_once();
+    *novo_ponteiro = 0;
+    if (!g_enabled || !realocacao_ligada()) return 0;
+
+    uint32_t phys = pointer & 0x1FFFFFFFu;
+    if (phys >= RDRAM_LIMIT) return 0;
+
+    unsigned char saida[SCRATCH_SLOT_BYTES];
+    size_t in = 0, out = 0;
+    uint32_t hash = 2166136261u;
+    unsigned traduzidos = 0;
+    unsigned reconhecidos_pt = 0;
+    size_t maior_fragmento = 0;
+    int viu_quebra = 0;
+    int terminou = 0;
+
+    while (in < MAX_TEXT && phys + in < RDRAM_LIMIT) {
+        uint8_t b = rd8(rdram, phys + (uint32_t)in);
+        if (!b) { terminou = 1; break; }
+        hash = (hash ^ b) * 16777619u;
+
+        /* Controles com argumento precisam permanecer juntos e na mesma
+         * posicao relativa entre os fragmentos. */
+        if (b >= 0xE0u && b <= 0xE2u && in + 1u < MAX_TEXT) {
+            uint8_t arg = rd8(rdram, phys + (uint32_t)in + 1u);
+            hash = (hash ^ arg) * 16777619u;
+            if (out + 2u >= sizeof(saida)) return 0;
+            saida[out++] = b;
+            saida[out++] = arg;
+            in += 2u;
+            continue;
+        }
+
+        if (b == '\n' || b == '\r' || b < 0x20u || b > 0x7Eu) {
+            if (out + 1u >= sizeof(saida)) return 0;
+            saida[out++] = b;
+            if (b == '\n' || b == '\r') viu_quebra = 1;
+            in++;
+            continue;
+        }
+
+        /* Um fragmento textual termina em controle, quebra ou NUL. */
+        char trecho[MAX_TEXT + 1];
+        size_t n = 0;
+        while (in + n < MAX_TEXT && phys + in + n < RDRAM_LIMIT) {
+            uint8_t c = rd8(rdram, phys + (uint32_t)(in + n));
+            if (!c || c == '\n' || c == '\r' || c < 0x20u || c > 0x7Eu ||
+                (c >= 0xE0u && c <= 0xE2u))
+                break;
+            if (n) hash = (hash ^ c) * 16777619u;
+            trecho[n++] = (char)c;
+        }
+        if (!n) return 0;
+        trecho[n] = '\0';
+
+        /* Depois de vsprintf, variaveis como BEAN/Josette ja ocupam o lugar
+         * do controle E0. Por isso uma linha inteira deixa de ser uma chave
+         * exata. Caminhe por ela e troque o maior fragmento conhecido em cada
+         * posicao; caracteres variaveis entre dois fragmentos sao copiados. */
+        size_t pos = 0;
+        while (pos < n) {
+            subtitle_entry_t* entry =
+                find_entry_longest_prefix(trecho + pos, n - pos);
+            if (entry) {
+                char convertido[SCRATCH_SLOT_BYTES];
+                size_t m = make_ascii(convertido, sizeof(convertido),
+                                      entry->translated);
+                /* A extracao por fragmentos reteve espacos de fronteira na
+                 * chave inglesa, mas varias traducoes foram revisadas sem
+                 * esses espacos. Eles sao estrutura quando ha uma variavel
+                 * entre duas chaves ("said " + BEAN + "-san"). Preserve-os
+                 * sem exigir que o catalogo replique esse detalhe invisivel. */
+                int espaco_inicio = entry->source_len &&
+                    entry->source[0] == ' ' && (!m || convertido[0] != ' ');
+                int espaco_fim = entry->source_len &&
+                    entry->source[entry->source_len - 1u] == ' ' &&
+                    (!m || convertido[m - 1u] != ' ');
+                if (!m || out + (size_t)espaco_inicio + m +
+                              (size_t)espaco_fim >= sizeof(saida))
+                    return 0;
+                if (espaco_inicio) saida[out++] = ' ';
+                memcpy(saida + out, convertido, m);
+                out += m;
+                if (espaco_fim) saida[out++] = ' ';
+                pos += entry->source_len;
+                traduzidos++;
+                if (entry->source_len > maior_fragmento)
+                    maior_fragmento = entry->source_len;
+            } else {
+                /* Um patch anterior pode ter traduzido fragmentos que cabiam
+                 * no bloco, deixando a mensagem 100% PT-BR mas ainda dividida
+                 * internamente. Reconheca a forma JA codificada e copie-a sem
+                 * retraduzir; a utilidade aqui e consolidar toda a cadeia na
+                 * arena para a rolagem nao reutilizar limites dos fragmentos. */
+                entry = find_entry_longest_translated_prefix(trecho + pos,
+                                                              n - pos);
+                if (entry) {
+                    size_t m = entry->translated_len;
+                    if (!m || out + m >= sizeof(saida)) return 0;
+                    memcpy(saida + out, trecho + pos, m);
+                    out += m;
+                    pos += m;
+                    reconhecidos_pt++;
+                    if (m > maior_fragmento) maior_fragmento = m;
+                } else {
+                    if (out + 1u >= sizeof(saida)) return 0;
+                    saida[out++] = (unsigned char)trecho[pos++];
+                }
+            }
+        }
+        in += n;
+    }
+    if (viu_quebra && out)
+        out = reflow_dialogue(saida, out, sizeof(saida));
+    /* A maioria das falas mistas tem dois ou mais fragmentos ingleses. Ha um
+     * caso observado em que a segunda linha ja foi traduzida in-place e resta
+     * apenas "Ah, right! I should explain how to". Autorize um unico match
+     * somente em mensagem multilinha e com uma chave longa; assim rotulos
+     * curtos e strings tecnicas nao viram casamentos acidentais. */
+    unsigned reconhecidos = traduzidos + reconhecidos_pt;
+    if (!terminou || !reconhecidos ||
+        (reconhecidos < 2u && (!viu_quebra || maior_fragmento < 12u)) ||
+        out + 1u > sizeof(saida))
+        return 0;
+    hash = (hash ^ 0u) * 16777619u;
+
+    for (uint32_t i = 0; i < g_composto_cache_n; i++) {
+        if (g_composto_cache[i].origem_phys == phys &&
+            g_composto_cache[i].hash == hash) {
+            *novo_ponteiro = 0x80000000u | g_composto_cache[i].slot_phys;
+            trace_source("recurso_ptbr_composto_cache", "mensagem fragmentada");
+            return 1;
+        }
+    }
+
+    uint32_t destino = arena_alocar_fixo(out + 1u);
+    if (!destino) return 0;
+    for (size_t i = 0; i < out; i++) wr8(rdram, destino + (uint32_t)i, saida[i]);
+    wr8(rdram, destino + (uint32_t)out, 0);
+
+    if (g_composto_cache_n < COMPOSTO_CACHE) {
+        composto_cache_t* cache = &g_composto_cache[g_composto_cache_n++];
+        cache->origem_phys = phys;
+        cache->hash = hash;
+        cache->slot_phys = destino;
+    }
+    *novo_ponteiro = 0x80000000u | destino;
+    trace_source("recurso_ptbr_composto", "mensagem fragmentada");
     return 1;
 }
 
@@ -1838,6 +2286,39 @@ static subtitle_entry_t* find_entry(const char* source) {
          index = g_entries[index].next)
         if (!strcmp(g_entries[index].source, source)) return &g_entries[index];
     return NULL;
+}
+
+static subtitle_entry_t* find_entry_longest_prefix(const char* source,
+                                                    size_t available) {
+    if (!available || !*source) return NULL;
+    uint32_t bucket = prefix_key_text(source) % HASH_BUCKETS;
+    subtitle_entry_t* best = NULL;
+    for (int index = g_prefix_buckets[bucket]; index >= 0;
+         index = g_entries[index].next) {
+        subtitle_entry_t* entry = &g_entries[index];
+        if (entry->source_len <= available &&
+            (!best || entry->source_len > best->source_len) &&
+            !memcmp(entry->source, source, entry->source_len))
+            best = entry;
+    }
+    return best;
+}
+
+static subtitle_entry_t* find_entry_longest_translated_prefix(
+    const char* source, size_t available) {
+    if (!available || !*source) return NULL;
+    uint32_t bucket = prefix_key_text(source) % HASH_BUCKETS;
+    subtitle_entry_t* best = NULL;
+    for (int index = g_translated_buckets[bucket]; index >= 0;
+         index = g_entries[index].next_translated) {
+        subtitle_entry_t* entry = &g_entries[index];
+        if (entry->translated_len <= available &&
+            (!best || entry->translated_len > best->translated_len) &&
+            !memcmp(entry->translated_encoded, source,
+                    entry->translated_len))
+            best = entry;
+    }
+    return best;
 }
 
 /* Acentuacao aplicada NA ROM, antes de o jogo copiar a fonte.

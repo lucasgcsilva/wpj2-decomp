@@ -91,6 +91,9 @@ prototipos/
 *.pdb
 *.log
 *.err
+# Temporarios que o cl.exe deixa na raiz quando compila varios fontes de uma
+# vez (_CL_xxxxxxxx). Ja escaparam para um "git add -A" uma vez.
+_CL_*
 
 # Relatorios gerados a cada execucao
 RESULTADO.md

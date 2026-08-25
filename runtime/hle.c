@@ -35,13 +35,68 @@ void func_80096B38(uint8_t* rdram, recomp_context* ctx) {
     uint32_t storage_phys = output_storage & 0x1FFFFFFFu;
     if (storage_phys + 4u <= 0x00400000u) {
         uint32_t resource = (uint32_t)MEM_W(0, (gpr)(int32_t)output_storage);
-        legendas_substituir_recurso(rdram, resource);
+        legendas_substituir_recurso_antes_formatador(rdram, resource);
     }
     /* A captura F5 provou que a copia acima fica PT-BR, mas o compositor ainda
      * le a cadeia inglesa. v0 conserva a fonte resolvida por esta rotina e o
      * chamador pode consumi-la diretamente. Substituir tambem essa referencia
      * cobre as duas saidas sem alterar ponteiros nem desenhar sobre a imagem. */
-    legendas_substituir_recurso(rdram, (uint32_t)ctx->r2);
+    /* A origem precisa continuar no endereco original quando a arena for
+     * necessaria, porque ela tambem e o cursor estrutural do bloco. Preparamos
+     * (e armazenamos em cache) o slot aqui, mas quem publica o ponteiro novo e
+     * func_800319B0 abaixo. Com realocacao desligada, a funcao conserva o
+     * comportamento historico in-place. */
+    {
+        uint32_t slot_preparado = 0;
+        legendas_realocar_recurso_antes_formatador(
+            rdram, (uint32_t)ctx->r2, &slot_preparado);
+    }
+}
+
+/* func_80096B38 devolve dois cursores sincronizados sobre um BLOCO de
+ * recursos: a origem e uma copia no heap. Reapontar apenas um cursor para uma
+ * string maior faz func_80096C6C avancar cada lado por comprimentos diferentes
+ * e corrompe a maquina de estados. O ponto seguro e este consumidor: 319B0
+ * recebe uma string individual e apenas publica seu ponteiro na fila circular
+ * D_801879D0. O cursor do bloco continua original; somente o ponteiro
+ * publicado pode apontar para a arena expansivel. */
+void func_800319B0__replaced(uint8_t* rdram, recomp_context* ctx);
+void func_800319B0(uint8_t* rdram, recomp_context* ctx) {
+    uint32_t realocado = 0;
+    int reconhecido = legendas_realocar_recurso_antes_formatador(
+        rdram, (uint32_t)ctx->r4, &realocado);
+    if (reconhecido && realocado) {
+        ctx->r4 = (gpr)(int32_t)realocado;
+    }
+    func_800319B0__replaced(rdram, ctx);
+}
+
+/* Segunda rota confirmada no wonder-source. 96D40 percorre os mesmos cursores
+ * sincronizados, mas publica cada origem diretamente numa tabela terminada em
+ * NULL, sem chamar 319B0. Deixe o corpo original construir a tabela e troque
+ * somente seus elementos depois; o bloco e os cursores continuam intactos. */
+void func_80096D40__replaced(uint8_t* rdram, recomp_context* ctx);
+void func_80096D40(uint8_t* rdram, recomp_context* ctx) {
+    uint32_t tabela = (uint32_t)ctx->r6;
+    func_80096D40__replaced(rdram, ctx);
+
+    uint32_t tabela_phys = tabela & 0x1FFFFFFFu;
+    if (tabela_phys >= 0x00400000u) return;
+    /* A referência aloca 0x40 ou 0x60 bytes para estas tabelas. O teto de 24
+     * entradas corresponde ao maior bloco e impede caminhar por memória
+     * arbitrária caso uma build futura mude o terminador. */
+    for (uint32_t i = 0; i < 24u && tabela_phys + (i + 1u) * 4u <= 0x00400000u;
+         i++) {
+        uint32_t atual = (uint32_t)MEM_W((int32_t)(i * 4u),
+                                         (gpr)(int32_t)tabela);
+        if (!atual) break;
+        uint32_t realocado = 0;
+        int reconhecido = legendas_realocar_recurso_antes_formatador(
+            rdram, atual, &realocado);
+        if (reconhecido && realocado)
+            MEM_W((int32_t)(i * 4u), (gpr)(int32_t)tabela) =
+                (gpr)(int32_t)realocado;
+    }
 }
 
 /* Textos estáticos, créditos e cartões de localização podem chegar direto ao
@@ -68,7 +123,33 @@ void func_80090E58(uint8_t* rdram, recomp_context* ctx) {
     uint32_t args_phys = args & 0x1FFFFFFFu;
     if (args_phys + 4u <= 0x00400000u) {
         uint32_t source = (uint32_t)MEM_W(0, (gpr)(int32_t)args);
-        legendas_substituir_recurso(rdram, source);
+        /* Mesma logica do carregador: aqui tambem temos o endereco publicado
+         * (args e char**), entao a realocacao e possivel nesta rota.
+         *
+         * WPJ2_REALOCAR_FMT=0 desliga SO esta rota, caindo de volta na
+         * substituicao in-place. Nasceu como bisseccao -- quando a primeira
+         * arena apagava a tela, era preciso saber se a culpa era deste gancho
+         * ou do endereco acima de 4 MB. Nao era nenhum dos dois: o defeito
+         * estava em reapontar os cursores de bloco de func_80096B38 (ver
+         * analise/projeto/realocacao_textos.md). A chave ficou porque isolar
+         * uma rota de texto por vez continua util em diagnostico. */
+        static int fmt = -1;
+        if (fmt < 0) {
+            const char* e = getenv("WPJ2_REALOCAR_FMT");
+            fmt = (e && *e) ? (*e != '0') : 1;
+        }
+        uint32_t realoc_fmt = 0;
+        if (fmt) {
+            int reconhecido = legendas_realocar_recurso(rdram, source,
+                                                         &realoc_fmt);
+            if (!reconhecido)
+                reconhecido = legendas_realocar_recurso_composto(
+                    rdram, source, &realoc_fmt);
+            if (reconhecido && realoc_fmt)
+                MEM_W(0, (gpr)(int32_t)args) = (gpr)(int32_t)realoc_fmt;
+        } else {
+            legendas_substituir_recurso(rdram, source);
+        }
         /* Auditoria opt-in da entrada EXATA do formatador. Os rotulos da tela
          * de saves nao aparecem como ASCII nem no cartucho nem no dump final;
          * registrar os bytes antes da conversao permite distinguir texto com
@@ -259,7 +340,11 @@ void func_800CB840(uint8_t* rdram, recomp_context* ctx) {
                alvo, sched_current(), os_atual, fila, fila_os);
         fflush(stdout);
     }
-    func_800CB840__replaced(rdram, ctx);
+    /* Nesta cena o corpo recompilado entrou no percurso da lista ativa e nao
+     * voltou: apos a linha acima, PIF, grafico e thread principal ficaram
+     * congelados enquanto o audio hospedado continuou. A implementacao nativa
+     * replica osDestroyThread com percurso limitado e sincroniza o fiber. */
+    sched_destroy_thread(rdram, (uint32_t)ctx->r4);
 }
 
 void func_800BC6EC(uint8_t* rdram, recomp_context* ctx) {
@@ -624,21 +709,31 @@ static uint32_t g_resource_rom_copies = 0;
 static FILE* g_text_rom_trace = NULL;
 static int g_text_rom_trace_ready = 0;
 static uint32_t g_text_rom_trace_lines = 0;
+static uint32_t g_text_rom_begin = WPJ2_TEXT_ROM_BEGIN;
+static uint32_t g_text_rom_end = WPJ2_TEXT_ROM_END;
 
 static void text_rom_trace(uint32_t source, uint32_t target, uint32_t size,
                            const char* route) {
-    uint64_t end = (uint64_t)source + size;
-    if (!size || source >= WPJ2_TEXT_ROM_END || end <= WPJ2_TEXT_ROM_BEGIN)
-        return;
     if (!g_text_rom_trace_ready) {
         const char* path = getenv("WPJ2_TEXT_ROM_TRACE");
+        const char* range = getenv("WPJ2_TEXT_ROM_RANGE");
         g_text_rom_trace_ready = 1;
+        if (range && *range) {
+            unsigned begin = 0, end = 0;
+            if (sscanf(range, "%x:%x", &begin, &end) == 2 && begin < end) {
+                g_text_rom_begin = begin;
+                g_text_rom_end = end;
+            }
+        }
         if (path && *path) {
             g_text_rom_trace = fopen(path, "w");
             if (g_text_rom_trace)
                 fprintf(g_text_rom_trace, "route,rom_source,rdram_target,bytes\n");
         }
     }
+    uint64_t end = (uint64_t)source + size;
+    if (!size || source >= g_text_rom_end || end <= g_text_rom_begin)
+        return;
     if (g_text_rom_trace && g_text_rom_trace_lines++ < 4096u) {
         fprintf(g_text_rom_trace, "%s,0x%08X,0x%08X,%u\n", route, source, target, size);
         fflush(g_text_rom_trace);
@@ -740,6 +835,18 @@ void func_800BD218(uint8_t* rdram, recomp_context* ctx) {
         if (getenv("WPJ2_ACENTOS_LEGADO") &&
             atoi(getenv("WPJ2_ACENTOS_LEGADO")) != 0)
             compor_fonte32(rdram);
+
+        /* Os rotulos dos menus nao passam pelo carregador de dialogos nem por
+         * func_80090E58. Cada um e copiado diretamente da ROM para um slot de
+         * 48 bytes (por exemplo, Message Speed: 0x68B924 -> 0x80363D50) e so
+         * depois rasterizado pelo jogo. Patchear o cartucho limitava a
+         * traducao aos 13 bytes da origem, embora o recurso vivo tenha espaco.
+         * Substituir aqui usa a capacidade real do slot e mantem intactos o
+         * compositor, o realce e a ordem de desenho nativos. Recursos binarios
+         * nao sao afetados: o interceptador exige uma chave textual completa
+         * presente no catalogo. */
+        if (source >= 0x0068B8E0u && source < 0x0068BF48u && size >= 2u)
+            legendas_substituir_recurso_com_capacidade(rdram, target, size);
         faixa_anotar(target_phys, size);
         text_rom_trace(source, target_phys, size, "resource");
         g_resource_rom_copies++;

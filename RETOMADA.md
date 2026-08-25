@@ -1005,3 +1005,360 @@ do recurso vivo, posterior ao `sprintf`.
 No replay completo com PT-BR, a contagem voltou a 4.702 tarefas gráficas em 18
 segundos e a thread principal terminou aguardando em `0x800CC98C`, em vez de
 presa no formatador.
+
+---
+
+# 16. Sessão de 25/08 — rótulos de menu: a hipótese da rasterização caiu
+
+**Não commitado.**
+
+## O que se acreditava
+
+O `PENDENCIAS.md` afirmava que `Day`, `Progress`, `Message Speed`,
+`Bird's Speed`, `Fast` e `Slow` "já chegam rasterizados numa imagem CI8
+intermediária", e que seria preciso interceptar quem gera essa textura.
+
+## O que a medição mostrou
+
+Despejo de strings da RDRAM na tela de velocidade (`WPJ2_LEGENDAS_RDRAM_CAPTURE`
+com o replay `menu_velocidade`):
+
+```
+0x0F8C9A   Message Speed
+0x0F8E8F   O Imp*rio Siliconiano     <- tradução nossa, já aplicada ali perto
+```
+
+O texto **existe vivo em memória**, e o nosso patcher **alcança aquela região**.
+Não era rasterização: era o orçamento de bytes de novo.
+
+Sete dos nove rótulos estão no bloco `0x68B9xx`/`0x68BExx` da ROM, separados
+por `\n` e sem enchimento — o limite é o tamanho exato do original.
+
+| rótulo | limite | antes | agora |
+|---|---|---|---|
+| `Message Speed` | 13 | `Velocidade da Mensagem` (22) | `Vel. Mensagem` |
+| `Bird's Speed` | 12 | `Velocidade do Bird` (18) | `Vel. do Bird` |
+| `Back` | 4 | `Voltar` (6) | `Sair` |
+| `End` | 3 | — | `Fim` |
+| `Normal` | 6 | `Normal` | já correto |
+| `Fast` | 4 | `Rápido` (6) | **pendente** |
+| `Slow` | 4 | `Lento` (5) | **pendente** |
+
+Validado na tela: a tela de velocidade exibe "Vel. Mensagem", "Vel. do Bird",
+"Fim" e "Sair", com o realce azul do cursor visível.
+
+## O que resta
+
+`Fast` e `Slow` cabem em quatro bytes — é decisão de redação, não de código.
+
+`Progress` e `Day` continuam sem origem textual: não estão na ROM em texto
+plano (`Day` só aparece dentro de "Days") nem apareceram no despejo da RDRAM.
+
+## Atualização Codex — 25/08/2026: falas parcialmente em inglês
+
+As cinco capturas da abertura não eram cinco traduções ausentes. Elas expõem
+um mesmo formato da ROM T-En: uma fala é formada por vários fragmentos do
+catálogo e controles que inserem nomes. O patch in-place traduzia apenas os
+fragmentos curtos, gerando frases EN/PT e, na fala longa, composição visual
+corrompida durante a rolagem.
+
+`legendas_realocar_recurso_composto` agora atua somente na entrada de
+`func_80090E58`, depois que `vsprintf` resolveu os controles. A rotina casa o
+maior fragmento em cada posição, conserva texto variável e espaços de
+fronteira e publica uma cadeia única na arena. Não ativar essa recomposição nas
+rotas anteriores ao formatador: `ã` usa o byte `%` e voltaria a travar a thread
+principal. Os cinco exemplos foram adicionados ao teste unitário, que passou;
+dois replays de regressão também permaneceram ativos.
+
+`Day` e `Progress` não pertencem a essa solução. Permanecem pré-rasterizados na
+imagem CI8 da seleção de diário e devem ser corrigidos no escritor/recurso
+nativo, nunca por sobreposição tardia no framebuffer.
+
+## Atualização Codex — 25/08/2026: controles E1 e trava após confirmar A
+
+As instruções do tutorial usam pares `E1 <cor>` e `E1 FF` ao redor das ações e
+botões. Eles já eram preservados, mas vários fragmentos (`"Yes"`, `"Good"`,
+`R-Button`, `Pad`, conectivos) estavam ausentes de `traducao_ptbr.tsv`. O
+catálogo foi completado e o teste agora cobre a cadeia com controles de cor.
+
+As falas longas ainda podiam corromper a rolagem quando todos os fragmentos já
+chegavam em português: a recomposição exigia ao menos um trecho inglês. Foi
+adicionado um índice pela forma PT-BR codificada; ele reconhece esses trechos,
+preserva os bytes e consolida a mensagem numa única cadeia estável.
+
+O congelamento depois de responder com A não ocorreu em `printf`. O log entra
+em `func_800CB840` (`osDestroyThread`) ao remover a thread 15 e nunca retorna;
+PIF e tarefas gráficas param, enquanto o áudio hospedado continua. O percurso
+recompilado da lista global de threads não tinha limite e encontrou uma lista
+cíclica. `sched_destroy_thread` agora remove o alvo de forma limitada da fila
+de escalonamento e da lista ativa, sincroniza seu fiber e permite recriar o
+mesmo objeto OSThread caso o pool do jogo o reutilize.
+Só para essas duas a hipótese da imagem pré-rasterizada continua de pé.
+
+## Lição de método
+
+A hipótese anterior era plausível e estava documentada como "causa
+confirmada". O que a derrubou foi uma medição barata que ninguém tinha feito:
+procurar a palavra como texto na memória. Vale desconfiar de "confirmado" que
+não aponta para a medida que o confirmou.
+
+---
+
+# 17. Encurtar as traduções ou mexer no limite? — evidência
+
+**Não commitado.** A pergunta é estratégica, e a melhor evidência é o que a
+própria tradução inglesa fez, já que ela enfrentou o mesmo problema vindo do
+japonês.
+
+## O que o patch do Ryu fez (lido do `.ips`)
+
+`src/scripts/analisar_ips.py` resume `tools/wpj2e_v1/Wpj2e_v1_z64.ips`:
+
+```
+registros            : 410
+bytes alterados      : 812 KiB
+maior offset tocado  : 0x880000        <- a ROM original terminava em 0x800000
+
+faixas contiguas, as maiores:
+  0x7FFFFE..0x880000   524290 bytes    <- regiao NOVA, meio megabyte
+  0x6A69E0..0x6C6FD8   132600 bytes
+  0x68B8E0..0x68BE08     1320 bytes    <- nosso bloco de menu, in-place
+```
+
+**Ele expandiu a ROM em 512 KiB.** A região nova contém 5099 cadeias de
+diálogo em inglês e **60% dela é zero** — cerca de 316 KB livres.
+
+Ou seja: mexer no limite não é especulação neste jogo. Já foi feito, e a
+infraestrutura está na ROM.
+
+## Onde as nossas recusas estão
+
+```
+recusas ABAIXO de 0x800000 (blocos in-place)  :  169
+recusas ACIMA  de 0x800000 (area realocada)   : 1506
+```
+
+Contra a intuição: o grosso está dentro da área realocada. Os 316 KB de zeros
+existem, mas **não colados a cada cadeia** — as strings estão empacotadas e a
+folga está concentrada noutro lugar. Por isso a folga não nos serve sem
+reapontar.
+
+## Leitura
+
+Encurtar e realocar não são alternativas excludentes; atacam populações
+diferentes:
+
+| | alcance | custo | risco |
+|---|---|---|---|
+| encurtar | as 169 apertadas + as que faltam por 1 byte | baixo, em lote pelo pipeline | nenhum |
+| realocar | as 1506 de uma vez, e remove o teto de vez | alto | precisa achar o ponteiro |
+
+A experiência deste projeto com caça a ponteiro (a fonte custou vários ciclos)
+recomenda não começar por aí sem antes confirmar, numa sessão focada, se a
+tabela existe. Uma tentativa de localizar ponteiros para a região não foi
+conclusiva: os acertos em `0x1011CB/DF/F3` têm passo de 20 bytes, sugerindo
+tabela de registros, mas os valores procurados são pequenos e podem coincidir.
+
+**Caminho mais barato para realocar, já identificado no `PENDENCIAS.md`:** não
+mexer na ROM, e sim no runtime — "redirecionar os dois ponteiros publicados por
+`func_80096B38` para slots expansíveis". Ali nós controlamos a memória, não
+precisamos de espaco contiguo na ROM, e o interceptador de recurso ja existe.
+
+## Recomendacao
+
+1. Encurtar agora o que a auditoria lista, em lote. Desbloqueia sem risco e a
+   lista com limite exato de cada entrada ja esta pronta.
+2. Em paralelo, uma sessao focada em `func_80096B38` para decidir se a
+   realocacao em runtime e viavel. Esse unico fato decide se o teto cai ou se
+   conviveremos com ele.
+
+---
+
+# 18. Garantia "tudo em memória, ROM intacta" — auditada e reforçada
+
+**Pergunta:** a ROM está sendo carregada inteira em memória? Alguma coisa
+escreve no arquivo original?
+
+**Resposta medida, não presumida.** `load_rom()` em `runtime/runtime.c` já
+atendia ao princípio:
+
+- `fopen(path, "rb")` — somente leitura;
+- `ftell` + `malloc(g_rom_size)` + um único `fread` da imagem **inteira**
+  (8.912.896 bytes, nada de streaming ou leitura parcial);
+- `fclose(f)` imediatamente depois — o arquivo nunca é reaberto;
+- o alvo dos patches é `cart = g_rdram + CART_OFFSET`, uma **segunda cópia**
+  produzida por `copy_swapped()`. `legendas_aplicar_cartucho()` opera só nela.
+
+Verificação empírica: MD5 do arquivo antes e depois de uma execução completa —
+`3c02f56dd7b1a06be83a7a288755612f` nos dois casos, tamanho idêntico.
+
+## O furo que existia: identidade por CRC1
+
+A checagem de identidade usava o **CRC1 lido em `0x10`**. Esse é um campo
+*dentro* do arquivo, não um hash do conteúdo: uma imagem adulterada carrega o
+mesmo CRC1 sem esforço. Ou seja, a garantia que queremos — *"qualquer ROM que
+bata com o nosso MD5 funciona no projeto"* — não estava sendo verificada de
+fato, e um usuário com uma ROM diferente veria sintomas confusos (texto e
+recursos em deslocamentos errados) sem nenhum aviso.
+
+**Correção.** MD5 sobre o buffer inteiro já carregado, calculado logo após o
+`fread`, com o valor de referência fixado em `WPJ2_ROM_MD5`. Implementação
+local em `runtime/runtime.c` (sem dependência nova, sem novo arquivo nos
+scripts de build, que listam fontes explicitamente).
+
+A implementação foi validada **antes** de entrar no runtime, contra três
+vetores conhecidos e contra o Python (`temp/testmd5.c`):
+
+| entrada | resultado |
+|---|---|
+| `""` | `d41d8cd98f00b204e9800998ecf8427e` |
+| `"abc"` | `900150983cd24fb0d6963f7d28e17f72` |
+| `"The quick brown fox…"` | `9e107d9d372bb6826bd81d3542a419d6` |
+| ROM Ryu v1.0 | `3c02f56dd7b1a06be83a7a288755612f` |
+
+Saída atual no boot:
+
+```
+ROM  : ...[T-En by Ryu v1.0].z64
+       8.50 MB, nome 'WONDER PROJECT J2   ', CRC1 4F1E88F7
+       MD5 3c02f56dd7b1a06be83a7a288755612f
+```
+
+Com MD5 divergente, o aviso passa a dizer o que realmente importa: que o
+projeto só é validado contra aquela imagem e que deslocamentos podem não bater.
+O CRC1 continua sendo impresso, mas rebaixado a informação de cabeçalho — se
+ele destoar de um MD5 correto, isso vira um aviso separado.
+
+## ⚠ Este MD5 é provisório e sai depois
+
+A amarração a **um** MD5 é andaime de desenvolvimento, não objetivo do projeto.
+O alvo é rodar **outras imagens do mesmo jogo** — a japonesa original e outras
+traduções. Nesse mundo um MD5 fixo vira estorvo.
+
+O que precisa existir antes de removê-lo: os deslocamentos de texto e recurso
+hoje são constantes casadas com a build Ryu v1.0. Trocar o MD5 por identificação
+dinâmica (CRC1 + tamanho) só faz sentido junto com **perfis de ROM** — cada
+imagem conhecida trazendo seus próprios deslocamentos. Enquanto isso não existe,
+o aviso evita o pior cenário, que é diagnosticar horas de sintoma estranho
+causado por ROM diferente.
+
+Marcado no código com `>>> PROVISORIO -- A REMOVER <<<` acima de
+`WPJ2_ROM_MD5`. Sai o bloco inteiro: `md5_hex`, a constante e o aviso em
+`load_rom`.
+
+**Nota de método (para não repetir):** o build visual é `WPJ2_RELEASE` e faz
+`freopen("NUL", "w", stdout)` quando `WPJ2_DEBUG` não está ligado. Qualquer
+tentativa de inspecionar saída de console precisa de `WPJ2_DEBUG=1`, senão o
+log sai vazio e parece que o programa não rodou.
+
+---
+
+# 19. Limite de textos — arena validada no consumidor correto
+
+A primeira implementação experimental reapontava as duas saídas de
+`func_80096B38` individualmente. O `wonder-source` mostra que elas são cursores
+sincronizados do mesmo bloco; `func_80096C6C` avança ambos conforme o layout
+original. Reapontar um cursor para uma string maior desviava o jogo do
+subestado `24` para `50` e provocava uma explosão de chamadas.
+
+A realocação foi movida para `func_800319B0`, que recebe uma cadeia individual
+e somente publica seu ponteiro em `D_801879D0`. O carregador agora mantém seus
+dois cursores intactos. O formatador `func_80090E58(char**)` continua podendo
+receber diretamente um slot expansível.
+
+O A/B forçando todas as traduções para a arena terminou no mesmo subestado e
+com carga equivalente ao modo sem arena. Um catálogo sintético confirmou uma
+tradução de 69 bytes sobre origem de 21: `recurso_ptbr_arena` seguido por
+`recurso_ptbr_arena_cache`, 3.657 tarefas gráficas e subestado final `24`.
+
+O replay tardio após `End` também permaneceu estável, com 5.042 tarefas
+gráficas. `TESTAR.bat` habilita o modo seguro `WPJ2_REALOCAR=1`; o modo 2 fica
+apenas para diagnóstico. A análise consolidada está em
+`analise/projeto/realocacao_textos.md`.
+
+A rota paralela `func_80096D40`, que publica uma tabela sem chamar `319B0`, foi
+coberta separadamente: o corpo original constrói a tabela e o wrapper reaponta
+somente seus elementos depois. O replay final com essa rota habilitada manteve
+4.440 tarefas gráficas em 18 segundos e a thread principal aguardando
+normalmente em `0x800CC98C`.
+
+---
+
+# 20. Rótulos completos da tela de velocidade
+
+Alterar `Vel. Mensagem` para `Velocidade da Mensagem` fazia o menu voltar ao
+inglês porque esse rótulo não percorre as arenas de diálogo. O trace de ROM
+localizou a rota exata:
+
+```
+Message Speed  0x0068B924 -> 0x00363D50  48 bytes
+Fast           0x0068B93C -> 0x00363DD0  48 bytes
+Slow           0x0068B944 -> 0x00363E10  48 bytes
+Bird's Speed   0x0068B968 -> 0x00363F10  48 bytes
+```
+
+O limite de 13/12/4 bytes existia somente porque o patch estático escrevia por
+cima da cadeia na ROM. `func_800BD218` já cria uma cópia privada de 48 bytes
+para cada rótulo. O runtime agora substitui o texto logo depois dessa cópia,
+passando a capacidade explícita do slot ao interceptador.
+
+O replay exibiu `Velocidade da Mensagem`, `Velocidade do Bird`, `Rápido`,
+`Lento`, `Fim` e `Sair`, preservando fonte, realce e composição originais. A
+execução permaneceu estável no estado `11/24`, com 3.747 tarefas gráficas.
+`Day` e `Progress` continuam sendo o único subcaso de menu sem origem textual.
+
+## Regressão detectada e retirada no mesmo hook
+
+A primeira versão chamava o interceptador também para **todas** as demais
+cópias de `func_800BD218`. Isso traduziu repetidamente o identificador técnico
+`SPI1` e voltou a inserir glifos reservados antes de `printf`; 5–6 segundos
+depois de `Fim`, a thread principal parava novamente em `vsprintf`.
+
+O hook foi restringido ao intervalo comprovado do bloco de menus
+`0x0068B8E0..0x0068BF48`. Validação após a restrição:
+
+- replay tardio: 6.511 tarefas gráficas, `main_func=0x800CC98C`, sem trava;
+- ocorrências indevidas de `SPI1`: zero;
+- replay do menu: os seis rótulos continuam PT-BR, 4.636 tarefas gráficas e
+  estado `11/24`.
+
+---
+
+# 21. Cobertura total do banco Ryu e rolagem das falas longas
+
+`blue` e `green` não eram falhas da extração: estavam no legado nos offsets
+`0x00800AAD` e `0x00800AB9`, mas o pipeline não os promoveu porque eram
+fragmentos curtos. Essa exclusão era incorreta. A auditoria agora considera
+toda fonte do banco textual oficial `0x00800000..0x0081FFFF`, inclusive nomes,
+aspas e espaços nas bordas. Foram encontradas 98 chaves ausentes e todas foram
+adicionadas ao mapa ativo; o veredito atual é 5.886 chaves e zero lacunas nesse
+banco. Falsos positivos fora dele continuam fora do catálogo.
+
+Nas falas longas, a arena já continha português correto. A sobreposição da tela
+era uma dupla quebra: a linha portuguesa ultrapassava a largura em pixels,
+quebrava automaticamente e logo encontrava a quebra fixa do inglês. A rota
+composta posterior a `vsprintf` agora remove as quebras puramente tipográficas
+e refaz linhas de até 38 glifos, mantendo os pares de controle `E0/E1/E2`.
+`test_legendas_recursos.exe` valida conteúdo, controles e limite de linha.
+
+---
+
+# 22. Congelamento tardio da abertura — proteção geral por fase
+
+O F5 no congelamento isolou `main_func=0x8008EDA4`, com gráficos presos em
+7.882 tarefas e áudio ainda ativo. O dump da RDRAM mostrou a fala de Geppetto
+já traduzida antes do formatador; o `ã` de `atenção` usa `0x25`, interpretado
+ali como comando `%`.
+
+Todas as rotas precoces de texto agora usam a API
+`legendas_*_antes_formatador`: se a tradução colidir com o alfabeto de
+formatos, ela é adiada sem modificar o recurso. A rota posterior a
+`func_8008EDA4` aplica a tradução normalmente. Isso cobre genericamente
+`func_80096B38`, `func_800319B0` e `func_80096D40`, em vez de criar exceção
+para uma fala.
+
+Validação automática de 175 segundos: 10.127 tarefas gráficas, função ativa
+fora de `0x8008EDA4`, filas em espera normal e registros pareados de
+`recurso_ptbr_adiado_formato`/substituição tardia. O teste unitário também
+reproduz a colisão e passou. O encerramento com código 1 foi o timeout
+deliberado do perfil sem janela, não uma falha do runtime.

@@ -75,6 +75,11 @@ set "WPJ2_AI_TIMED=0"
 REM O corredor atravessa o plano da camera. O F3DEX recorta as faces; descartar
 REM o triangulo inteiro faz paredes sumirem por um quadro e voltarem no outro.
 set "WPJ2_F3D_W_CLIP=1"
+REM Traducoes maiores que o recurso ingles sao publicadas por ponteiro numa
+REM arena fora do heap de 4 MB do jogo. O carregador conserva seus dois cursores
+REM originais sincronizados; a troca acontece somente no consumidor da string.
+set "WPJ2_REALOCAR=1"
+set "WPJ2_REALOCAR_FMT=1"
 set "WPJ2_BISSECAO="
 set "WPJ2_BUTTONS="
 set "WPJ2_WINDOW_TITLE=Wonder Project J2 - %PERFIL%"
@@ -85,7 +90,10 @@ REM em textos\ (local, derivado da ROM, fora do Git). "TESTAR.bat sem_legendas"
 REM roda em ingles para comparacao.
 set "WPJ2_LEGENDAS=%~dp0textos\traducao_ptbr.tsv"
 set "WPJ2_LEGENDAS_LOG=%SAIDA%\legendas_rota.tsv"
-set "WPJ2_LEGENDAS_RDRAM_CAPTURE=0"
+REM Temporariamente ativo tambem no perfil padrao: as falas com controles E1
+REM e rolagem longa so podem ser confirmadas pelo recurso vivo do mesmo F5.
+REM O custo ocorre apenas ao apertar F5 e os dumps continuam em temp\.
+set "WPJ2_LEGENDAS_RDRAM_CAPTURE=1"
 if /I "%PERFIL%"=="sem_legendas" set "WPJ2_LEGENDAS="
 if /I "%PERFIL%"=="input"        set "WPJ2_LEGENDAS="
 if /I "%PERFIL%"=="divergencia"  set "WPJ2_LEGENDAS="
