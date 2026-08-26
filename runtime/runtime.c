@@ -1056,7 +1056,10 @@ static void carregar_replay(const char* caminho) {
         printf("[replay] nao consegui abrir %s\n", caminho);
         return;
     }
-    static char linha[8192];
+    /* 4.096 transicoes com botoes e analogico podem ultrapassar 64 KiB. O
+       arquivo nao passa pela linha de comando; manter o buffer grande evita
+       truncar bookmarks de sessoes longas. */
+    static char linha[131072];
     unsigned long long alvo = 0;
     while (fgets(linha, sizeof(linha), f)) {
         char* fim = linha + strlen(linha);
@@ -1070,11 +1073,10 @@ static void carregar_replay(const char* caminho) {
     }
     fclose(f);
     printf("[replay] %s carregado\n", caminho);
-    /* O turbo so vale a pena um pouco antes do alvo: parar exatamente nele
-       deixaria a cena aparecer no mesmo instante em que a velocidade normaliza,
-       sem margem para observar a entrada. */
-    if (alvo > 30ull) hle_definir_alvo_turbo(alvo - 30ull);
-    else if (alvo) hle_definir_alvo_turbo(alvo);
+    /* O bookmark representa a leitura exata em que F2 foi pressionado. O
+       roteiro permanece ativo até lá; desacelerar antes fazia o usuário ainda
+       esperar cerca de um segundo para retornar à cena pedida. */
+    if (alvo) hle_definir_alvo_turbo(alvo);
     fflush(stdout);
 }
 

@@ -8,12 +8,16 @@
 #include "video.h"
 #include "runtime.h"
 #include "legendas.h"
+#include "rt64_backend.h"
 
 #define VIDEO_W 320u
 #define VIDEO_H 240u
+#define PRESENT_W 640u
+#define PRESENT_H 480u
 
 static HWND g_video_window = NULL;
 static uint32_t g_pixels[VIDEO_W * VIDEO_H];
+static uint32_t g_pixels_2x[PRESENT_W * PRESENT_H];
 static BITMAPINFO g_bmi;
 static ULONGLONG g_last_present = 0;
 static int g_video_enabled = 0;
@@ -24,57 +28,51 @@ static uint32_t g_last_origin = 0, g_last_width = 0, g_last_height = 0, g_last_f
 static unsigned g_capture_count = 0;
 static int g_tem_quadro_apresentado = 0;
 static int g_present_smooth = 0;
+static int g_present_coverage_2x = 0;
 static int g_vi_gamma = -1;
 static uint32_t g_pixels_filtrados[VIDEO_W * VIDEO_H];
 static int g_vi_filter_2d = -1;
 static char g_video_title[256];
 
-/* Checkpoint experimental de uma unica sessao. O espaco KSEG1 e um alias da
- * mesma RDRAM; portanto 8 MB sao suficientes e nao se deve copiar a janela
- * inteira de 1 GB. F2/F4 nao e ainda um savestate completo: as pilhas das
- * OSThreads vivem em fibers do Windows e TMEM/RSP tambem tem estado local.
- * Ainda assim, a RAM e o framebuffer sao a parte que custa chegar ate uma
- * cutscene e este ponto de partida permite medir exatamente o que falta. */
-#define VIDEO_CHECKPOINT_RDRAM_BYTES 0x00800000u
-static uint8_t* g_checkpoint_rdram = NULL;
-static uint32_t g_checkpoint_pixels[VIDEO_W * VIDEO_H];
-static uint32_t g_checkpoint_origin, g_checkpoint_width;
-static uint32_t g_checkpoint_height, g_checkpoint_format;
-static uint64_t g_checkpoint_retrace;
-static int g_checkpoint_ready = 0;
-static unsigned g_checkpoint_loads = 0;
+/* Bookmark reproduzivel. Restaurar somente RDRAM por baixo das fibers antigas
+ * era intrinsecamente inconsistente: pilhas C, filas, TMEM e audio permaneciam
+ * no futuro e o jogo travava depois de um ou dois F4. F2 agora grava a entrada
+ * indexada pelas leituras do PIF; F4 pede ao TESTAR.bat uma execucao nova, que
+ * refaz o caminho em turbo e chega ao mesmo ponto com todas as threads validas. */
+static int g_bookmark_restart = 0;
 
-typedef struct {
-    char magic[8];
-    uint32_t version;
-    uint32_t rdram_bytes;
-    uint64_t retrace;
-    uint32_t origin, width, height, format;
-    uint32_t pixels_bytes;
-} video_checkpoint_header_t;
-
-static int video_checkpoint_path(char* path, size_t capacity) {
-    char pasta[MAX_PATH] = "temp\\projeto\\testar";
-    DWORD n = GetEnvironmentVariableA("WPJ2_CAPTURE_DIR", pasta, sizeof(pasta));
+static int video_bookmark_path(char* path, size_t capacity,
+                               const char* filename) {
+    char pasta[MAX_PATH] = "sav\\bookmarks";
+    DWORD n = GetEnvironmentVariableA("WPJ2_BOOKMARK_DIR", pasta,
+                                      sizeof(pasta));
     if (n >= sizeof(pasta)) return 0;
+    CreateDirectoryA("sav", NULL);
     CreateDirectoryA(pasta, NULL);
-    snprintf(path, capacity, "%s\\state_f2.wpj2state", pasta);
+    snprintf(path, capacity, "%s\\%s", pasta, filename);
     return 1;
 }
 
 static void video_update_title(void) {
     if (!g_video_window) return;
-    SetWindowTextA(g_video_window, g_video_title);
+    if (hle_fast_forward_active()) {
+        char title[sizeof(g_video_title) + 16];
+        snprintf(title, sizeof(title), "%s [8x]", g_video_title);
+        SetWindowTextA(g_video_window, title);
+    } else {
+        SetWindowTextA(g_video_window, g_video_title);
+    }
 }
 
-/* O VI amacia a saida do RDP antes de ela chegar a TV. Como a nossa RDRAM
- * contem RGB5551 cru, os retangulos 2D ampliados da abertura revelavam linhas
- * de cada bloco. Esta aproximacao de 5 amostras só toca bordas de contraste
- * alto e só e chamada para listas TEXRECT; TRI1/TRI2 3D ficam intactos. */
+/* O VI do jogo liga OS_VI_DITHER_FILTER_ON, mas o filtro real depende dos
+ * bits ocultos de cobertura do RDP. O framebuffer minimo guarda somente
+ * RGB5551; uma media espacial de cinco pixels nao e equivalente ao VI e
+ * mancha gradientes e texturas 3D. A aproximacao antiga fica disponivel
+ * somente como lente diagnostica explicita. */
 static int video_vi_filter_2d_ativo(void) {
     if (g_vi_filter_2d < 0) {
         const char* e = getenv("WPJ2_VI_FILTER_2D");
-        g_vi_filter_2d = !e || atoi(e) != 0;
+        g_vi_filter_2d = e && atoi(e) != 0;
     }
     return g_vi_filter_2d;
 }
@@ -158,25 +156,73 @@ static void video_store_history(void) {
     if (g_history_count < VIDEO_HISTORY) g_history_count++;
 }
 
-static void video_write_bmp(const char* nome, const uint32_t* pixels) {
+static void video_write_bmp_size(const char* nome, const uint32_t* pixels,
+                                 uint32_t width, uint32_t height) {
     FILE* imagem = fopen(nome, "wb");
     if (!imagem) return;
     BITMAPFILEHEADER arquivo = {0};
     BITMAPINFOHEADER cabecalho = {0};
+    uint32_t bytes = width * height * sizeof(uint32_t);
     arquivo.bfType = 0x4D42;
     arquivo.bfOffBits = sizeof(arquivo) + sizeof(cabecalho);
-    arquivo.bfSize = arquivo.bfOffBits + sizeof(g_pixels);
+    arquivo.bfSize = arquivo.bfOffBits + bytes;
     cabecalho.biSize = sizeof(cabecalho);
-    cabecalho.biWidth = VIDEO_W;
-    cabecalho.biHeight = -(LONG)VIDEO_H;
+    cabecalho.biWidth = (LONG)width;
+    cabecalho.biHeight = -(LONG)height;
     cabecalho.biPlanes = 1;
     cabecalho.biBitCount = 32;
     cabecalho.biCompression = BI_RGB;
-    cabecalho.biSizeImage = sizeof(g_pixels);
+    cabecalho.biSizeImage = bytes;
     fwrite(&arquivo, sizeof(arquivo), 1, imagem);
     fwrite(&cabecalho, sizeof(cabecalho), 1, imagem);
-    fwrite(pixels, sizeof(g_pixels), 1, imagem);
+    fwrite(pixels, bytes, 1, imagem);
     fclose(imagem);
+}
+
+static void video_write_bmp(const char* nome, const uint32_t* pixels) {
+    video_write_bmp_size(nome, pixels, VIDEO_W, VIDEO_H);
+}
+
+/* O swapchain Vulkan nao passa por g_pixels. Capturar o cliente ja composto
+ * pelo DWM fotografa exatamente a saida RT64 que o usuario esta vendo,
+ * incluindo upscale/VI, e exclui bordas e titulo da janela. */
+static int video_capture_rt64_client(const char* nome, uint32_t* width,
+                                     uint32_t* height) {
+    if (!g_video_window || !IsWindowVisible(g_video_window)) return 0;
+    RECT client;
+    if (!GetClientRect(g_video_window, &client)) return 0;
+    LONG w = client.right - client.left, h = client.bottom - client.top;
+    if (w <= 0 || h <= 0) return 0;
+    POINT origem = {0, 0};
+    if (!ClientToScreen(g_video_window, &origem)) return 0;
+
+    HDC screen = GetDC(NULL);
+    HDC memory = screen ? CreateCompatibleDC(screen) : NULL;
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* pixels = NULL;
+    HBITMAP bitmap = memory ? CreateDIBSection(memory, &bmi, DIB_RGB_COLORS,
+                                               &pixels, NULL, 0) : NULL;
+    HGDIOBJ anterior = bitmap ? SelectObject(memory, bitmap) : NULL;
+    int ok = bitmap && pixels && BitBlt(memory, 0, 0, w, h, screen,
+                                        origem.x, origem.y,
+                                        SRCCOPY | CAPTUREBLT);
+    if (ok) {
+        video_write_bmp_size(nome, (const uint32_t*)pixels,
+                             (uint32_t)w, (uint32_t)h);
+        if (width) *width = (uint32_t)w;
+        if (height) *height = (uint32_t)h;
+    }
+    if (anterior) SelectObject(memory, anterior);
+    if (bitmap) DeleteObject(bitmap);
+    if (memory) DeleteDC(memory);
+    if (screen) ReleaseDC(NULL, screen);
+    return ok;
 }
 
 /* F5 salva o viewport que acabou de ser apresentado, nao uma foto da area de
@@ -193,7 +239,10 @@ static void video_capture_f5(void) {
     snprintf(bmp, sizeof(bmp), "%s\\f5_%03u.bmp", pasta, id);
     snprintf(info, sizeof(info), "%s\\f5_%03u.txt", pasta, id);
 
-    video_write_bmp(bmp, g_pixels);
+    uint32_t capture_width = VIDEO_W, capture_height = VIDEO_H;
+    int capture_rt64 = rt64_backend_active() &&
+        video_capture_rt64_client(bmp, &capture_width, &capture_height);
+    if (!capture_rt64) video_write_bmp(bmp, g_pixels);
     /* Mantem a foto visual e arma, separadamente, a proxima tarefa de audio.
        O aperto pode ocorrer no meio do retrace; copiar a proxima AList evita
        um estado parcialmente atualizado e deixa a captura reproduzivel. */
@@ -209,6 +258,9 @@ static void video_capture_f5(void) {
         fprintf(dados, "origin_apresentado=%06X", g_last_origin); fputc(10, dados);
         fprintf(dados, "vi_origin_atual=%06X", vi_origin & 0x1FFFFFFFu); fputc(10, dados);
         fprintf(dados, "video=%ux%u formato=%u", g_last_width, g_last_height, g_last_format); fputc(10, dados);
+        fprintf(dados, "captura_visual=%s %ux%u",
+                capture_rt64 ? "rt64_dwm" : "cpu_rdram",
+                capture_width, capture_height); fputc(10, dados);
         fprintf(dados, "retrace=%llu", (unsigned long long)hle_retraces()); fputc(10, dados);
         fprintf(dados, "gfx=%llu audio=%llu", (unsigned long long)rsp_tasks_tipo(1),
                 (unsigned long long)rsp_tasks_tipo(2)); fputc(10, dados);
@@ -254,87 +306,42 @@ static void video_capture_history_f6(void) {
 
 static void video_checkpoint_f2(void) {
     if (!g_last_rdram) return;
-    if (!g_checkpoint_rdram) {
-        g_checkpoint_rdram = (uint8_t*)malloc(VIDEO_CHECKPOINT_RDRAM_BYTES);
-        if (!g_checkpoint_rdram) {
-            printf("[estado] F2: memoria insuficiente para checkpoint de 8 MB\n");
-            fflush(stdout);
-            return;
-        }
-    }
-    memcpy(g_checkpoint_rdram, g_last_rdram, VIDEO_CHECKPOINT_RDRAM_BYTES);
-    memcpy(g_checkpoint_pixels, g_pixels, sizeof(g_pixels));
-    g_checkpoint_origin = g_last_origin;
-    g_checkpoint_width = g_last_width;
-    g_checkpoint_height = g_last_height;
-    g_checkpoint_format = g_last_format;
-    g_checkpoint_retrace = hle_retraces();
-    g_checkpoint_ready = 1;
-    g_checkpoint_loads = 0;
+    char replay[MAX_PATH], imagem[MAX_PATH], info[MAX_PATH];
+    if (!video_bookmark_path(replay, sizeof(replay), "quick.replay") ||
+        !video_bookmark_path(imagem, sizeof(imagem), "quick.bmp") ||
+        !video_bookmark_path(info, sizeof(info), "quick.txt")) return;
 
-    char path[MAX_PATH];
-    if (!video_checkpoint_path(path, sizeof(path))) return;
-    FILE* f = fopen(path, "wb");
-    video_checkpoint_header_t h = { { 'W','P','J','2','S','T','A','T' }, 1u,
-        VIDEO_CHECKPOINT_RDRAM_BYTES, g_checkpoint_retrace,
-        g_checkpoint_origin, g_checkpoint_width, g_checkpoint_height,
-        g_checkpoint_format, sizeof(g_checkpoint_pixels) };
-    int gravou = f && fwrite(&h, sizeof(h), 1, f) == 1 &&
-                 fwrite(g_checkpoint_rdram, VIDEO_CHECKPOINT_RDRAM_BYTES, 1, f) == 1 &&
-                 fwrite(g_checkpoint_pixels, sizeof(g_checkpoint_pixels), 1, f) == 1;
-    if (f) fclose(f);
-    printf("[estado] F2: checkpoint salvo em %s (%s)\n", path,
-           gravou ? "8 MB + quadro" : "falha ao gravar arquivo");
+    int gravou = pif_gravar_replay(replay);
+    if (gravou) video_write_bmp(imagem, g_pixels);
+    FILE* f = gravou ? fopen(info, "w") : NULL;
+    if (f) {
+        uint16_t estado = *(uint16_t*)(g_last_rdram + (0x001A7234u ^ 2u));
+        uint16_t subestado = *(uint16_t*)(g_last_rdram + (0x001A723Cu ^ 2u));
+        fprintf(f, "formato=WPJ2_BOOKMARK_1\n");
+        fprintf(f, "retrace=%llu\n", (unsigned long long)hle_retraces());
+        fprintf(f, "poll_controle=%llu\n",
+                (unsigned long long)pif_polls_atuais());
+        fprintf(f, "estado=%d/%d\n", (int16_t)estado, (int16_t)subestado);
+        fprintf(f, "framebuffer=%06X %ux%u formato=%u\n", g_last_origin,
+                g_last_width, g_last_height, g_last_format);
+        fclose(f);
+    }
+    printf("[bookmark] F2: %s (%s; substitui o bookmark anterior)\n",
+           replay, gravou ? "replay + imagem + metadados" : "falha");
     fflush(stdout);
 }
 
 static void video_checkpoint_f4(void) {
-    if (!g_last_rdram) return;
-    if (g_checkpoint_loads) {
-        printf("[estado] F4: este checkpoint ja foi restaurado; pressione F2 para rearmar\n");
-        fflush(stdout);
-        return;
-    }
     char path[MAX_PATH];
-    if (!video_checkpoint_path(path, sizeof(path))) return;
-    FILE* f = fopen(path, "rb");
-    video_checkpoint_header_t h;
-    int leu = f && fread(&h, sizeof(h), 1, f) == 1 &&
-              memcmp(h.magic, "WPJ2STAT", 8) == 0 && h.version == 1u &&
-              h.rdram_bytes == VIDEO_CHECKPOINT_RDRAM_BYTES &&
-              h.pixels_bytes == sizeof(g_checkpoint_pixels);
-    if (leu && !g_checkpoint_rdram) g_checkpoint_rdram = (uint8_t*)malloc(VIDEO_CHECKPOINT_RDRAM_BYTES);
-    if (leu && g_checkpoint_rdram)
-        leu = fread(g_checkpoint_rdram, VIDEO_CHECKPOINT_RDRAM_BYTES, 1, f) == 1 &&
-              fread(g_checkpoint_pixels, sizeof(g_checkpoint_pixels), 1, f) == 1;
-    if (f) fclose(f);
-    if (!leu || !g_checkpoint_rdram) {
-        printf("[estado] F4: arquivo invalido ou incompleto: %s\n", path);
+    if (!video_bookmark_path(path, sizeof(path), "quick.replay")) return;
+    DWORD attr = GetFileAttributesA(path);
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        printf("[bookmark] F4: nenhum bookmark; grave primeiro com F2\n");
         fflush(stdout);
         return;
     }
-    g_checkpoint_ready = 1;
-    g_checkpoint_retrace = h.retrace;
-    g_checkpoint_origin = h.origin; g_checkpoint_width = h.width;
-    g_checkpoint_height = h.height; g_checkpoint_format = h.format;
-    if (!g_checkpoint_ready) {
-        printf("[estado] F4: nenhum checkpoint F2 nesta execucao\n");
-        fflush(stdout);
-        return;
-    }
-    /* Copia apenas no thread que apresenta o VI, isto e, entre retraces. Nao
-     * troca fibers nem reexecuta instrucoes: e deliberadamente um load
-     * observavel, para a proxima lista grafica restaurar o estado local. */
-    memcpy(g_last_rdram, g_checkpoint_rdram, VIDEO_CHECKPOINT_RDRAM_BYTES);
-    memcpy(g_pixels, g_checkpoint_pixels, sizeof(g_pixels));
-    g_last_origin = g_checkpoint_origin;
-    g_last_width = g_checkpoint_width;
-    g_last_height = g_checkpoint_height;
-    g_last_format = g_checkpoint_format;
-    g_tem_quadro_apresentado = 1;
-    g_checkpoint_loads++;
-    printf("[estado] F4: arquivo restaurado (%s, origem retrace %llu)\n", path,
-           (unsigned long long)g_checkpoint_retrace);
+    g_bookmark_restart = 1;
+    printf("[bookmark] F4: reinicio seguro solicitado para %s\n", path);
     fflush(stdout);
 }
 
@@ -348,9 +355,40 @@ static void video_blit(HDC dc) {
      * rasterizador 3D permanecem inalterados. */
     SetStretchBltMode(dc, g_present_smooth ? HALFTONE : COLORONCOLOR);
     if (g_present_smooth) SetBrushOrgEx(dc, 0, 0, NULL);
+    const uint32_t* pixels = g_present_coverage_2x ? g_pixels_2x : g_pixels;
+    uint32_t sw = g_present_coverage_2x ? PRESENT_W : VIDEO_W;
+    uint32_t sh = g_present_coverage_2x ? PRESENT_H : VIDEO_H;
     StretchDIBits(dc, 0, 0, r.right - r.left, r.bottom - r.top,
-                  0, 0, VIDEO_W, VIDEO_H, g_pixels, &g_bmi,
+                  0, 0, sw, sh, pixels, &g_bmi,
                   DIB_RGB_COLORS, SRCCOPY);
+}
+
+/* A saída original é 4:3. O RT64 acompanha WM_SIZE e recria o swapchain, mas
+ * deixar a borda livre deformaria a imagem antes de o renderer aplicar suas
+ * barras. Ajustar o RECT durante o arraste mantém o cliente em 4:3. */
+static void video_keep_4_3(HWND hwnd, WPARAM edge, RECT* rect) {
+    if (!hwnd || !rect) return;
+    RECT window, client;
+    if (!GetWindowRect(hwnd, &window) || !GetClientRect(hwnd, &client)) return;
+    LONG frame_w = (window.right - window.left) - (client.right - client.left);
+    LONG frame_h = (window.bottom - window.top) - (client.bottom - client.top);
+    LONG outer_w = rect->right - rect->left;
+    LONG outer_h = rect->bottom - rect->top;
+    LONG client_w = outer_w - frame_w;
+    LONG client_h = outer_h - frame_h;
+    if (client_w < 320) client_w = 320;
+    if (client_h < 240) client_h = 240;
+
+    if (edge == WMSZ_TOP || edge == WMSZ_BOTTOM) {
+        client_w = (client_h * 4 + 1) / 3;
+        rect->right = rect->left + client_w + frame_w;
+    } else {
+        client_h = (client_w * 3 + 2) / 4;
+        if (edge == WMSZ_TOPLEFT || edge == WMSZ_TOPRIGHT)
+            rect->top = rect->bottom - client_h - frame_h;
+        else
+            rect->bottom = rect->top + client_h + frame_h;
+    }
 }
 
 static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -371,6 +409,20 @@ static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_video_quit = 1;
         return 0;
     }
+    if (msg == WM_SIZING) {
+        video_keep_4_3(hwnd, wp, (RECT*)lp);
+        return TRUE;
+    }
+    if (msg == WM_GETMINMAXINFO) {
+        MINMAXINFO* limits = (MINMAXINFO*)lp;
+        RECT minimum = {0, 0, 320, 240};
+        DWORD style = (DWORD)GetWindowLongPtr(hwnd, GWL_STYLE);
+        DWORD exstyle = (DWORD)GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+        AdjustWindowRectEx(&minimum, style, FALSE, exstyle);
+        limits->ptMinTrackSize.x = minimum.right - minimum.left;
+        limits->ptMinTrackSize.y = minimum.bottom - minimum.top;
+        return 0;
+    }
     /* ---- Teclado como controle do N64 ----
      *
      * Ate aqui os botoes so existiam por variavel de ambiente (WPJ2_BUTTONS,
@@ -384,7 +436,9 @@ static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
      * quando a tecla e solta. */
     if (msg == WM_KEYDOWN || msg == WM_KEYUP) {
         uint16_t bit = 0;
-        static int state_up = 0, state_down = 0, state_left = 0, state_right = 0;
+        int analogico = 0;
+        static int state_up = 0, state_down = 0;
+        static int state_left = 0, state_right = 0;
 
         switch (wp) {
             case VK_RETURN: bit = 0x1000; break;            /* START */
@@ -393,30 +447,39 @@ static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             case 'C': bit = 0x2000; break;                  /* Z */
             case 'Q': bit = 0x0020; break;                  /* L */
             case 'E': bit = 0x0010; break;                  /* R */
-            case VK_UP:    case 'W': bit = 0x0800; state_up = (msg == WM_KEYDOWN); break;
-            case VK_DOWN:  case 'S': bit = 0x0400; state_down = (msg == WM_KEYDOWN); break;
-            case VK_LEFT:  case 'A': bit = 0x0200; state_left = (msg == WM_KEYDOWN); break;
-            case VK_RIGHT: case 'D': bit = 0x0100; state_right = (msg == WM_KEYDOWN); break;
+            case 'W': bit = 0x0800; break;                  /* D-Pad cima */
+            case 'S': bit = 0x0400; break;                  /* D-Pad baixo */
+            case 'A': bit = 0x0200; break;                  /* D-Pad esquerda */
+            case 'D': bit = 0x0100; break;                  /* D-Pad direita */
+            case 'I': bit = 0x0008; break;                  /* C cima */
+            case 'K': bit = 0x0004; break;                  /* C baixo */
+            case 'J': bit = 0x0002; break;                  /* C esquerda */
+            case 'L': bit = 0x0001; break;                  /* C direita */
+            case VK_UP:    state_up = (msg == WM_KEYDOWN); analogico = 1; break;
+            case VK_DOWN:  state_down = (msg == WM_KEYDOWN); analogico = 1; break;
+            case VK_LEFT:  state_left = (msg == WM_KEYDOWN); analogico = 1; break;
+            case VK_RIGHT: state_right = (msg == WM_KEYDOWN); analogico = 1; break;
             default: break;
         }
-        if (bit) {
+        if (bit || analogico) {
             static uint16_t pressionados = 0;
             uint16_t antes = pressionados;
-            if (msg == WM_KEYDOWN) pressionados |= bit;
-            else                   pressionados &= (uint16_t)~bit;
+            if (bit) {
+                if (msg == WM_KEYDOWN) pressionados |= bit;
+                else                   pressionados &= (uint16_t)~bit;
+            }
 
             pif_update_stick_from_keys(state_up, state_down, state_left, state_right);
 
-            if (pressionados != antes) {
-                pif_set_buttons(pressionados);
-                printf("[controle] botoes=0x%04X (analogico %s%s%s%s)\n",
-                       pressionados,
-                       state_up ? "CIMA " : "",
-                       state_down ? "BAIXO " : "",
-                       state_left ? "ESQ " : "",
-                       state_right ? "DIR " : "");
-                fflush(stdout);
-            }
+            if (pressionados != antes) pif_set_buttons(pressionados);
+            printf("[controle] botoes=0x%04X analogico=%s%s%s%s%s\n",
+                   pressionados,
+                   (!state_up && !state_down && !state_left && !state_right) ? "CENTRO" : "",
+                   state_up ? "CIMA " : "",
+                   state_down ? "BAIXO " : "",
+                   state_left ? "ESQ " : "",
+                   state_right ? "DIR " : "");
+            fflush(stdout);
             return 0;
         }
     }
@@ -430,23 +493,6 @@ static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     if (msg == WM_KEYDOWN && wp == VK_F2 && !(lp & (1L << 30))) {
         video_checkpoint_f2();
-        /* Alem do checkpoint de RDRAM, grava um ponto de REPRODUCAO.
-         *
-         * Os dois servem ao mesmo desejo - voltar a esta cena - mas so o
-         * segundo e confiavel. O checkpoint restaura a RDRAM por baixo de
-         * fibers cujas pilhas continuam na posicao antiga, e por isso trava com
-         * facilidade; a reproducao refaz o caminho como execucao normal, com
-         * a entrada vinda do roteiro. Ver o comentario em runtime/pif.c. */
-        {
-            char pasta[MAX_PATH] = "temp\\projeto\\testar";
-            DWORD n = GetEnvironmentVariableA("WPJ2_CAPTURE_DIR", pasta, sizeof(pasta));
-            if (n < sizeof(pasta)) {
-                char caminho[MAX_PATH + 32];
-                CreateDirectoryA(pasta, NULL);
-                snprintf(caminho, sizeof(caminho), "%s\\replay.txt", pasta);
-                pif_gravar_replay(caminho);
-            }
-        }
         return 0;
     }
     if (msg == WM_KEYDOWN && wp == VK_F4 && !(lp & (1L << 30))) {
@@ -454,18 +500,23 @@ static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     /* F10 fica reservado: elevar a cadencia parava fibers sem avancar a ROM.
-     * O checkpoint F2/F4 e o unico salto experimental habilitado por ora. */
+     * F2/F4 usa reinicio com reproducao deterministica. */
     if (msg == WM_KEYDOWN && wp == VK_F10 && !(lp & (1L << 30))) {
-        (void)hle_toggle_fast_forward();
-        video_update_title();
         printf("[controle] F10: aceleracao indisponivel; use F2/F4\n");
         fflush(stdout);
         return 0;
     }
-    /* Diagnostico audivel da rota RSP nativa: alterna mistura completa e
-       cada voz do ENVMIXER sem reiniciar a cutscene. */
-    if (msg == WM_KEYDOWN && wp == VK_F11 && !(lp & (1L << 30))) {
-        rsp_cycle_audio_voice();
+    /* Avanco momentaneo: pressionar muda a cadencia emulada para 8x e tira o
+       audio hospedado do caminho critico; soltar restaura ambos imediatamente. */
+    if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && wp == VK_F11) {
+        int enabled = msg == WM_KEYDOWN;
+        hle_set_fast_forward(enabled);
+        audio_set_fast_forward(enabled);
+        video_update_title();
+        if (!(lp & (1L << 30)) || msg == WM_KEYUP) {
+            printf("[controle] F11: velocidade %s\n", enabled ? "8x" : "normal");
+            fflush(stdout);
+        }
         return 0;
     }
     return DefWindowProc(hwnd, msg, wp, lp);
@@ -491,16 +542,23 @@ int video_init(void) {
     const char* titulo = getenv("WPJ2_WINDOW_TITLE");
     if (!titulo || !*titulo) titulo = "Wonder Project J2 - prototipo recompilado";
     snprintf(g_video_title, sizeof(g_video_title), "%s", titulo);
-    g_video_window = CreateWindowExA(0, wc.lpszClassName, titulo,
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 660, 525, NULL, NULL, wc.hInstance, NULL);
+    {
+        const char* e = getenv("WPJ2_PRESENT_COVERAGE_2X");
+        g_present_coverage_2x = !e || atoi(e) != 0;
+    }
+    DWORD estilo = WS_OVERLAPPEDWINDOW;
+    RECT wr = { 0, 0, (LONG)PRESENT_W, (LONG)PRESENT_H };
+    AdjustWindowRect(&wr, estilo, FALSE);
+    g_video_window = CreateWindowExA(0, wc.lpszClassName, titulo, estilo,
+        CW_USEDEFAULT, CW_USEDEFAULT, wr.right - wr.left, wr.bottom - wr.top,
+        NULL, NULL, wc.hInstance, NULL);
     if (!g_video_window) {
         printf("[video] nao foi possivel criar a janela (%lu)\n", GetLastError());
         return 0;
     }
     g_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    g_bmi.bmiHeader.biWidth = VIDEO_W;
-    g_bmi.bmiHeader.biHeight = -(LONG)VIDEO_H; /* DIB top-down */
+    g_bmi.bmiHeader.biWidth = g_present_coverage_2x ? PRESENT_W : VIDEO_W;
+    g_bmi.bmiHeader.biHeight = -(LONG)(g_present_coverage_2x ? PRESENT_H : VIDEO_H);
     g_bmi.bmiHeader.biPlanes = 1;
     g_bmi.bmiHeader.biBitCount = 32;
     g_bmi.bmiHeader.biCompression = BI_RGB;
@@ -510,17 +568,16 @@ int video_init(void) {
     g_video_quit = 0;
     g_hold_last_nonblack = getenv("WPJ2_WINDOW_HOLD_LAST") != NULL &&
                            atoi(getenv("WPJ2_WINDOW_HOLD_LAST")) != 0;
-    /* Ligado por padrao. Estava desligado, ou seja, ampliavamos 320x240 ate o
-     * tamanho da janela repetindo pixel - o que cria escada mesmo em imagem
-     * que nao tem serrilhado nenhum na origem. Parte do "serrilhado" relatado
-     * nasce aqui, e nao na rasterizacao. WPJ2_PRESENT_SMOOTH=0 volta ao
-     * vizinho-mais-proximo, que continua sendo o modo certo para comparar
-     * pixel a pixel com o oraculo. */
+    /* O HALFTONE do GDI borra o quadro inteiro e nao corresponde ao filtro VI
+     * nem ao coverage do RDP. Com janela 640x480 a escala e exatamente 2x;
+     * COLORONCOLOR preserva o pixel resolvido pelo rasterizador. O modo suave
+     * continua disponivel apenas para comparacao explicita. */
     {
         const char* e = getenv("WPJ2_PRESENT_SMOOTH");
-        g_present_smooth = !e || atoi(e) != 0;
+        g_present_smooth = e && atoi(e) != 0;
     }
-    printf("[video] janela aberta: %s (320x240 ampliado)\n", titulo);
+    printf("[video] janela aberta: %s (coverage %s, cliente 640x480)\n", titulo,
+           g_present_coverage_2x ? "2x" : "nativo");
     fflush(stdout);
     return 1;
 }
@@ -532,6 +589,23 @@ void video_present(uint8_t* rdram, uint32_t origin, uint32_t width,
         return;
     video_pump_messages();
     if (!g_video_window) return;
+
+    /* RT64 recebe as listas GBI diretamente e apresenta pela mesma janela.
+     * Não ler nem converter o framebuffer pela CPU nessa rota: além do custo,
+     * isso sobrescreveria a swap chain que acabou de ser renderizada. */
+    if (rt64_backend_active()) {
+        /* F5 e bookmarks ainda precisam dos metadados do VI/RDRAM mesmo que
+           os pixels finais pertençam ao swapchain da GPU. */
+        g_last_rdram = rdram;
+        g_last_origin = origin;
+        g_last_width = width;
+        g_last_height = height;
+        g_last_format = format;
+        g_tem_quadro_apresentado = 1;
+        g_last_present = GetTickCount64();
+        rt64_backend_present();
+        return;
+    }
 
     /* A tarefa gráfica pode terminar muitas vezes entre duas apresentações.
        O limitador é só do host: testá-lo antes de ler e converter o
@@ -548,6 +622,7 @@ void video_present(uint8_t* rdram, uint32_t origin, uint32_t width,
     if (transicao == 1 && g_tem_quadro_apresentado) return;
     if (transicao == 2) {
         memset(g_pixels, 0, sizeof(g_pixels));
+        memset(g_pixels_2x, 0, sizeof(g_pixels_2x));
         g_last_rdram = rdram;
         g_last_origin = origin;
         g_last_width = width;
@@ -605,6 +680,20 @@ void video_present(uint8_t* rdram, uint32_t origin, uint32_t width,
     #define VI_CTRL_DITHER_FILTER 0x10000u
     if (video_vi_filter_2d_ativo() && (vi_status & VI_CTRL_DITHER_FILTER))
         video_filtrar_vi_2d(height);
+    if (g_present_coverage_2x) {
+        if (!rsp_coverage_frame_2x(rdram, origin, width, height, g_pixels_2x)) {
+            for (uint32_t y = 0; y < PRESENT_H; y++) for (uint32_t x = 0; x < PRESENT_W; x++)
+                g_pixels_2x[y * PRESENT_W + x] = g_pixels[(y >> 1) * VIDEO_W + (x >> 1)];
+        } else if (gamma) {
+            for (uint32_t i = 0; i < PRESENT_W * PRESENT_H; i++) {
+                uint32_t p = g_pixels_2x[i];
+                uint32_t r = (uint32_t)(sqrt((double)((p >> 16) & 255u) * 255.0) + 0.5);
+                uint32_t g = (uint32_t)(sqrt((double)((p >> 8) & 255u) * 255.0) + 0.5);
+                uint32_t b = (uint32_t)(sqrt((double)(p & 255u) * 255.0) + 0.5);
+                g_pixels_2x[i] = (r << 16) | (g << 8) | b;
+            }
+        }
+    }
     g_last_rdram = rdram;
     g_last_origin = origin;
     g_last_width = width;
@@ -624,12 +713,12 @@ apresentar:
 }
 
 void video_shutdown(void) {
+    rt64_backend_shutdown();
     if (g_video_window) DestroyWindow(g_video_window);
     g_video_window = NULL;
     g_video_enabled = 0;
-    free(g_checkpoint_rdram);
-    g_checkpoint_rdram = NULL;
-    g_checkpoint_ready = 0;
 }
 
 int video_quit_requested(void) { return g_video_quit; }
+int video_bookmark_restart_requested(void) { return g_bookmark_restart; }
+void* video_native_window(void) { return g_video_window; }

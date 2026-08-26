@@ -28,6 +28,7 @@ echo === compilando o runtime ===
 cl /nologo /c /O2 /std:c17 /EHa /MP /DRECOMP_TRACING /DRECOMP_POLLING %INC% ^
    "%PROJ%\runtime\runtime.c" "%PROJ%\runtime\sched.c" "%PROJ%\runtime\hle.c" ^
    "%PROJ%\runtime\pif.c" "%PROJ%\runtime\mempak.c" "%PROJ%\runtime\rsp.c" "%PROJ%\runtime\video.c" "%PROJ%\runtime\audio.c" ^
+   "%PROJ%\runtime\rt64_backend.c" ^
    "%PROJ%\runtime\legendas.c" ^
    "%PROJ%\runtime\func_table.c" ^
    /Fo"%PROJ%\build\objp\\"
@@ -50,3 +51,18 @@ link /nologo /MAP:"%PROJ%\build\wpj2_probe.map" /DEFAULTLIB:user32.lib /DEFAULTL
      /OUT:"%PROJ%\wpj2_probe.exe" "%PROJ%\build\objp\*.obj"
 if errorlevel 1 exit /b 1
 dir "%PROJ%\wpj2_probe.exe"
+
+if /I "%~1"=="rt64" (
+  echo === configurando a ponte RT64 nativa ===
+  if not exist "C:\PROGRA~1\MIB055~1\2022\COMMUN~1\Common7\IDE\COMMON~1\MICROS~1\CMake\Ninja\ninja.exe" (
+    echo Ninja do Visual Studio nao encontrado.
+    exit /b 1
+  )
+  cmake -S "%PROJ%\src\rt64_bridge" -B "%PROJ%\build\rt64_bridge_native2" -G Ninja ^
+        -DCMAKE_BUILD_TYPE=Release "-DCMAKE_MAKE_PROGRAM=C:\PROGRA~1\MIB055~1\2022\COMMUN~1\Common7\IDE\COMMON~1\MICROS~1\CMake\Ninja\ninja.exe"
+  if errorlevel 1 exit /b 1
+  echo === compilando a ponte RT64 nativa ===
+  cmake --build "%PROJ%\build\rt64_bridge_native2" --target wpj2_rt64_bridge --parallel
+  if errorlevel 1 exit /b 1
+  dir "%PROJ%\build\rt64_runtime\wpj2_rt64_bridge.dll"
+)

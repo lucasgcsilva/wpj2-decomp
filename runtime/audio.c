@@ -27,6 +27,7 @@ static uint32_t g_peak;
 static uint32_t g_buffer_index;
 static int g_enabled;
 static int g_play_enabled;
+static int g_play_fast_forward;
 /* Ganho de apresentacao do host, em Q15. Nao participa da RSP nem grava
  * estados na RDRAM: serve para separar saturacao na saida de PCM corrompido
  * durante as sondagens. */
@@ -296,6 +297,19 @@ static void audio_play_buffer(uint8_t* rdram, uint32_t p, uint32_t bytes) {
     slot->prepared = 1;
 }
 
+void audio_set_fast_forward(int enabled) {
+    enabled = enabled != 0;
+    if (enabled == g_play_fast_forward) return;
+    g_play_fast_forward = enabled;
+    /* Audio em tempo real nao pode pautar uma simulacao acelerada. Ao entrar no
+       avanco, descarte a fila hospedada; ao soltar, o proximo DMA volta a ser
+       ouvido ja no ponto corrente, sem segundos de audio antigo acumulado. */
+    if (enabled && g_wave) {
+        waveOutReset(g_wave);
+        audio_play_reap(1);
+    }
+}
+
 void audio_init(void) {
     const char* espera = getenv("WPJ2_AUDIO_WAIT_MS");
     if (espera) {
@@ -457,7 +471,8 @@ void audio_queue_ai_buffer(uint8_t* rdram, uint32_t address, uint32_t bytes) {
     rsp_audio_probe_ai_buffer(rdram, p, bytes);
     /* A interrupcao AI faz parte da emulacao mesmo quando a captura WAV esta
        desligada. O arquivo e apenas uma observacao opcional. */
-    if (g_play_enabled) audio_play_buffer(rdram, p, bytes);
+    if (g_play_enabled && !g_play_fast_forward)
+        audio_play_buffer(rdram, p, bytes);
     audio_buffer_capture(rdram, p, bytes);
     if (!g_enabled || !g_wav) return;
     /* Limite de 16 MiB para uma sonda curta nao consumir o disco sem controle. */

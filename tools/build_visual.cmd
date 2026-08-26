@@ -38,6 +38,7 @@ cl /nologo /c /O2 /std:c17 /EHa /MP /DRECOMP_POLLING %WPJ2_BUILD_MODE% %WPJ2_TRA
    "%PROJ%\runtime\runtime.c" "%PROJ%\runtime\sched.c" "%PROJ%\runtime\hle.c" ^
    "%PROJ%\runtime\legendas.c" ^
    "%PROJ%\runtime\pif.c" "%PROJ%\runtime\mempak.c" "%PROJ%\runtime\rsp.c" "%PROJ%\runtime\video.c" "%PROJ%\runtime\audio.c" ^
+   "%PROJ%\runtime\rt64_backend.c" ^
    "%PROJ%\runtime\func_table.c" /Fo"%PROJ%\build\objv\\"
 if errorlevel 1 exit /b 1
 echo === compilando microcodigo RSP de audio ===

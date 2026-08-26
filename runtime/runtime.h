@@ -97,7 +97,7 @@ int      hle_deliver_events(uint8_t* rdram);
 void     hle_set_event_mask(uint32_t mask);
 uint32_t hle_event_mask(void);
 void     hle_set_retrace(double hz);
-/* Reservado para aceleracao futura: a cadencia desta ROM permanece fixa. */
+void     hle_set_fast_forward(int enabled);
 int      hle_toggle_fast_forward(void);
 int      hle_fast_forward_active(void);
 void     hle_clock_init(void);
@@ -117,6 +117,7 @@ uint64_t rsp_tasks_tipo(int tipo);
  * proxima AList de audio, cuja entrada completa podera ser confrontada com o
  * mesmo instante capturado no Project64. */
 void     rsp_request_audio_state_capture(void);
+void     audio_set_fast_forward(int enabled);
 void     rsp_audio_probe_ai_buffer(uint8_t* rdram, uint32_t address, uint32_t bytes);
 void     rsp_audio_probe_flush(void);
 /* Telemetria de custo do rasterizador. So e observada quando um chamador pede
@@ -148,6 +149,11 @@ uint64_t rsp_last_gfx_z_rejected(void);
 /* Estado visual de uma troca de framebuffer detectada pela própria lista RDP:
  * 0 normal, 1 conservar quadro frontal, 2 preto temporário. */
 int      rsp_transition_presentation_mode(void);
+/* Resolve as quatro amostras RDP diretamente num quadro RGB888 640x480.
+ * Retorna zero quando o alvo apresentado nao possui coverage conservado. */
+int      rsp_coverage_frame_2x(uint8_t* rdram, uint32_t origin,
+                               uint32_t width, uint32_t height,
+                               uint32_t* rgb_out);
 uint64_t rsp_alpha_texrects(void);
 uint32_t rsp_alpha_rect_x0(void);
 uint32_t rsp_alpha_rect_y0(void);

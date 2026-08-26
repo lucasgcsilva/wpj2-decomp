@@ -19,6 +19,8 @@ REM    sem_legendas  roda em ingles, para comparacao
 REM    audio_rsp     microcodigo de audio recompilado no lugar do HLE C
 REM    audio_fonte   rota mais fiel: microcodigo real + cadencia virtual do AI
 REM    divergencia   varredura da bissecao HLE x microcodigo real
+REM    rt64_ref      backend RT64 paralelo, ROM japonesa e sem traducao
+REM    cpu           comparacao/fallback com rasterizador CPU antigo
 REM
 REM  Toda saida vai para temp\projeto\<perfil>\ conforme ESTRUTURA.md.
 REM  Fechar a janela encerra o teste. Nao ha limite de tempo.
@@ -30,6 +32,13 @@ cd /d "%~dp0"
 set "PERFIL=%~1"
 if "%PERFIL%"=="" set "PERFIL=padrao"
 set "ARG=%~2"
+
+REM Referencia grafica isolada. Nao usa wpj2_probe.exe nem altera o backend
+REM CPU padrao; prepara a ROM japonesa na ordem Z64 e abre o RT64 pelo WSLg.
+if /I "%PERFIL%"=="rt64_ref" (
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0src\scripts\executar_rt64_referencia.ps1"
+  exit /b !errorlevel!
+)
 
 REM --- executavel -----------------------------------------------------------
 REM wpj2_probe.exe e o alvo de tools\build_probe.cmd e reune tudo: legendas
@@ -53,11 +62,18 @@ del /q "%SAIDA%\*.log" >nul 2>nul
 set "WPJ2_CAPTURE_DIR=%SAIDA%"
 set "WPJ2_OUT=%SAIDA%\"
 set "WPJ2_STATUS_FILE=%SAIDA%\status.txt"
+set "WPJ2_BOOKMARK_DIR=%~dp0sav\bookmarks"
+set "WPJ2_REPLAY="
 
 REM --- base comum -----------------------------------------------------------
 set "WPJ2_WINDOW=1"
 set "WPJ2_TIMEOUT=0"
 set "WPJ2_RETRACE=60"
+REM Apresentacao limpa em escala inteira; o AA vem do coverage solicitado
+REM pela propria ROM, nao do HALFTONE global do GDI.
+set "WPJ2_PRESENT_SMOOTH=0"
+set "WPJ2_PRESENT_COVERAGE_2X=0"
+set "WPJ2_RDP_AA=1"
 set "WPJ2_AUDIO=1"
 set "WPJ2_AUDIO_PLAY=1"
 set "WPJ2_AUDIO_FAST=0"
@@ -82,7 +98,8 @@ set "WPJ2_REALOCAR=1"
 set "WPJ2_REALOCAR_FMT=1"
 set "WPJ2_BISSECAO="
 set "WPJ2_BUTTONS="
-set "WPJ2_WINDOW_TITLE=Wonder Project J2 - %PERFIL%"
+set "WPJ2_WINDOW_TITLE=Wonder Project J2 - PT-BR + RT64 nativo"
+set "WPJ2_GFX_BACKEND=rt64"
 
 REM --- legendas PT-BR: LIGADAS POR PADRAO ------------------------------------
 REM Era o perfil padrao antes desta reescrita e voltou a ser. O catalogo fica
@@ -100,6 +117,14 @@ if /I "%PERFIL%"=="divergencia"  set "WPJ2_LEGENDAS="
 if not exist "%WPJ2_LEGENDAS%" set "WPJ2_LEGENDAS="
 
 REM --- perfis ---------------------------------------------------------------
+
+REM RT64 e o backend padrao. Este perfil conserva o rasterizador anterior para
+REM comparacao e tambem prova o fallback sem renomear/remover DLLs.
+if /I "%PERFIL%"=="cpu" (
+  set "WPJ2_GFX_BACKEND=cpu"
+  set "WPJ2_PRESENT_COVERAGE_2X=1"
+  set "WPJ2_WINDOW_TITLE=Wonder Project J2 - backend CPU"
+)
 
 REM Sonda de entrada. A cadeia PIF -> gContPad -> gControllerRaw ja foi
 REM verificada como correta (ENTRADA_RETOMADA.md, 22/08); este perfil existe
@@ -231,8 +256,9 @@ echo.
 echo   Wonder Project J2 - perfil: %PERFIL%
 echo   ------------------------------------------------
 if /I not "%PERFIL%"=="input" if /I not "%PERFIL%"=="divergencia" (
-  echo    Enter=START   X/Espaco=A   Z=B   C=Z   A/S=L/R   Setas=direcional
-  echo    F5 captura   F6 historico   F2/F4 checkpoint   F11 voz do audio
+  echo    Enter=START   X/Espaco=A   Z=B   C=Z   Q/E=L/R
+  echo    WASD=D-Pad   Setas=analogico   IJKL=C-Buttons
+  echo    F5 captura   F6 historico   F2 salva/F4 retorna   segure F11=8x
   echo.
   echo    Feche a janela para encerrar.
 )
@@ -242,8 +268,18 @@ REM o que promete passa despercebido - foi o que aconteceu com WPJ2_INPUT.
 echo   Env:   LEGENDAS=%WPJ2_LEGENDAS% BUTTONS=%WPJ2_BUTTONS% INPUT=%WPJ2_INPUT%
 echo.
 
-"%~dp0%EXE%" "%ROM%" > "%SAIDA%\execucao.log" 2>&1
-set "SAIDA_CODE=%errorlevel%"
+set "REINICIOS_BOOKMARK=0"
+:executar_runtime
+"%~dp0%EXE%" "%ROM%" >> "%SAIDA%\execucao.log" 2>&1
+set "SAIDA_CODE=!errorlevel!"
+if "!SAIDA_CODE!"=="42" (
+  set /a REINICIOS_BOOKMARK+=1
+  set "WPJ2_REPLAY=%WPJ2_BOOKMARK_DIR%\quick.replay"
+  echo.
+  echo   Bookmark solicitado: reiniciando e reproduzindo em turbo...
+  >> "%SAIDA%\execucao.log" echo [bookmark] supervisor reinicio !REINICIOS_BOOKMARK!
+  goto :executar_runtime
+)
 
 REM --- resumo ---------------------------------------------------------------
 echo.

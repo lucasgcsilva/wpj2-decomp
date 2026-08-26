@@ -11,12 +11,18 @@ Resultados produzidos pelo runtime deste projeto e já interpretados.
   ADPCM transferidas pelo PI para o cache de áudio.
 - `graficos_clipping_corredor.md`: regressão causada pela perda da chave de
   recorte F3DEX e restauração do clipping homogêneo no corredor.
+- `renderizacao_3d_fast3d.md`: textura, iluminação, cobertura/AA e VI no
+  corredor 3D, comparados às referências Fast3D e GLideN64.
 - `acentuacao_ptbr.md`: causa do `#` no lugar dos acentos, correção da cópia
   inicial da fonte Ryu e validação dos 14 glifos especiais.
 - `integracao_legendas.md`: rota real do diálogo inglês descompactado e estado
   da substituição PT-BR.
 - `referencia_wonder_llonsit.md`: avaliação da decompilação pública da ROM
   japonesa e pontos reaproveitáveis por endereço.
+- `referencia_wpj2_recomp_vmarcelo.md`: auditoria da recompilação independente
+  baseada em RT64, com comparação de cobertura e plano de adoção da GPU.
+- `integracao_rt64.md`: arquitetura e validação do backend híbrido definitivo,
+  com RT64 apenas no vídeo e os demais subsistemas preservados localmente.
 - `legendas/`: duas referências visuais usadas para localizar os buffers e o
   controle de cor da primeira caixa de diálogo.
 

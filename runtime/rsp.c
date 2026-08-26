@@ -25,6 +25,7 @@
 
 #include "runtime.h"
 #include "funcs.h"
+#include "rt64_backend.h"
 
 #define SP_STATUS_ADDR   0xA4040010u
 
@@ -41,6 +42,9 @@
 
 /* Definidos adiante, junto da memoria do RSP. */
 static uint32_t sp_word(uint32_t off);
+/* Precisa existir antes do handler SP: a ponte RT64 recebe DMEM/IMEM da
+ * própria tarefa no instante em que o RSP é solto. */
+static uint8_t g_spmem[SPMEM_SIZE];
 static uint16_t rsp_rdram16(uint8_t* rdram, uint32_t phys) {
     return *(uint16_t*)(rdram + (phys ^ 2u));
 }
@@ -326,7 +330,14 @@ void func_800CD010(uint8_t* rdram, recomp_context* ctx) {
             g_texture_definida_na_tarefa = 0;
             LARGE_INTEGER raster_inicio, raster_fim, raster_freq;
             QueryPerformanceCounter(&raster_inicio);
-            desenhar_dl(rdram, lista, 0);
+            /* O backend alternativo recebe a mesma GBI/OSTask da ROM. Se a
+             * DLL não existir ou rejeitar a lista, o rasterizador CPU continua
+             * sendo fallback por tarefa e mantém o executável recuperável. */
+            int desenhou_rt64 = rt64_backend_submit(
+                rdram, g_spmem, lista, bytes,
+                sp_word(TASK_OFFSET + 0x10),
+                sp_word(TASK_OFFSET + 0x18));
+            if (!desenhou_rt64) desenhar_dl(rdram, lista, 0);
             QueryPerformanceCounter(&raster_fim);
             if (g_cimg_addr && capturar_gfx_atual()) {
                 char rot[96];
@@ -502,7 +513,6 @@ void func_800CD010(uint8_t* rdram, recomp_context* ctx) {
  * A libultra copia a OSTask para a DMEM em 0x04000FC0 antes de soltar o RSP.
  * Interceptar aqui e o unico jeito de ver a tarefa inteira: tipo, microcodigo,
  * lista de exibicao e buffers de saida. */
-static uint8_t g_spmem[SPMEM_SIZE];
 static uint64_t g_sp_dma = 0;
 static int g_vistas[TIPO_MAX];        /* quantas ja foram mostradas, por tipo */
 
@@ -678,10 +688,23 @@ static uint32_t g_othermode_l = 0;
 /* Parte alta de SETOTHERMODE: CYCLETYPE esta nos bits 20..21. O caminho 2D
  * usa COPY em alguns mosaicos e esse modo tem borda de TEXRECT propria. */
 static uint32_t g_othermode_h = 0;
+/* G_MDSFT_TEXTPERSP fica no bit 19 de OtherMode_H. O RT64 nao escolhe a
+ * interpolacao pela presenca de matriz: ele obedece ao estado emitido pela
+ * display list e, em G_TP_NONE, aplica a compensacao 0,5 observada no RDP. */
+#define G_MDSFT_TEXTPERSP 19u
+#define G_TP_PERSP_BIT (1u << G_MDSFT_TEXTPERSP)
+static uint64_t g_tex_persp_pixels = 0;
+static uint64_t g_tex_affine_pixels = 0;
 /* Cobertura 2x2 da cor-alvo atual. O RDP conserva cobertura entre triangulos;
  * sem isso duas metades de uma face deixam uma costura escura ao aplicar AA. */
 static uint8_t g_aa_cobertura[320 * 240];
+static uint16_t g_aa_amostras[320 * 240 * 4];
+static uint32_t g_aa_amostras_rgb[320 * 240 * 4];
+static uint8_t g_aa_amostras_hires[320 * 240];
+static uint8_t g_aa_z_valida[320 * 240];
+static uint16_t g_aa_z_amostras[320 * 240 * 4];
 static uint32_t g_aa_cimg = UINT32_MAX;
+static uint32_t g_aa_zimg = UINT32_MAX;
 static int g_aa_experimental = -1;
 
 /* O microcodigo pode manter G_FOG no modo geometrico enquanto uma sublista
@@ -788,6 +811,39 @@ uint32_t rsp_last_gfx_tri_camera_rejected(void) { return g_ultima_gfx_tri_camera
 uint64_t rsp_last_gfx_z_accepted(void) { return g_ultima_gfx_z_aceitos; }
 uint64_t rsp_last_gfx_z_rejected(void) { return g_ultima_gfx_z_recusados; }
 int rsp_transition_presentation_mode(void) { return g_transicao_apresentacao; }
+int rsp_coverage_frame_2x(uint8_t* rdram, uint32_t origin,
+                          uint32_t width, uint32_t height,
+                          uint32_t* rgb_out) {
+    if (!rdram || !rgb_out || width < 320u || height > 240u ||
+        g_aa_cimg != origin)
+        return 0;
+    int algum_hires = 0;
+    for (uint32_t y = 0; y < height; y++) for (uint32_t x = 0; x < 320u; x++) {
+        uint32_t ci = y * 320u + x;
+        uint32_t base_rgb;
+        int usar_hires = g_aa_cobertura[ci] && g_aa_amostras_hires[ci];
+        if (!usar_hires) {
+            uint16_t p = *(uint16_t*)(rdram + ((origin + (y * width + x) * 2u) ^ 2u));
+            uint32_t r = ((p >> 11) & 31u) * 255u / 31u;
+            uint32_t g = ((p >> 6) & 31u) * 255u / 31u;
+            uint32_t b = ((p >> 1) & 31u) * 255u / 31u;
+            base_rgb = (r << 16) | (g << 8) | b;
+        } else {
+            base_rgb = 0;
+            algum_hires = 1;
+        }
+        uint32_t* a = &g_aa_amostras_rgb[ci * 4u];
+        uint32_t linha0 = (y * 2u) * 640u + x * 2u;
+        uint32_t linha1 = linha0 + 640u;
+        rgb_out[linha0] = usar_hires ? a[0] : base_rgb;
+        rgb_out[linha0 + 1u] = usar_hires ? a[1] : base_rgb;
+        rgb_out[linha1] = usar_hires ? a[2] : base_rgb;
+        rgb_out[linha1 + 1u] = usar_hires ? a[3] : base_rgb;
+    }
+    for (uint32_t y = height * 2u; y < 480u; y++)
+        memset(rgb_out + y * 640u, 0, 640u * sizeof(uint32_t));
+    return algum_hires;
+}
 uint64_t rsp_alpha_texrects(void) { return g_alpha_texrects; }
 uint32_t rsp_alpha_rect_x0(void) { return g_alpha_rect_x0; }
 uint32_t rsp_alpha_rect_y0(void) { return g_alpha_rect_y0; }
@@ -1044,18 +1100,21 @@ uint64_t rsp_texrects(void)  { return g_texrects; }
 uint64_t rsp_texels(void)    { return g_texels; }
 
 static void aa_preparar_alvo(void) {
-    if (g_aa_cimg == g_cimg_addr) return;
+    if (g_aa_cimg == g_cimg_addr && g_aa_zimg == g_zimg_addr) return;
     memset(g_aa_cobertura, 0, sizeof(g_aa_cobertura));
+    memset(g_aa_amostras_hires, 0, sizeof(g_aa_amostras_hires));
+    memset(g_aa_z_valida, 0, sizeof(g_aa_z_valida));
     g_aa_cimg = g_cimg_addr;
+    g_aa_zimg = g_zimg_addr;
 }
 
 static int aa_habilitado(void) {
     if (g_aa_experimental < 0) {
         const char* e = getenv("WPJ2_RDP_AA");
-        /* O AA completo exige cobertura por amostra tambem no Z-buffer. A
-         * versao 2x2 atual fica opt-in ate essa parte estar pronta, para nao
-         * introduzir costuras no caminho visual normal. */
-        g_aa_experimental = e && atoi(e) != 0;
+        /* A cobertura 2x2 conserva as quatro cores por pixel, portanto faces
+         * adjacentes nao deixam mais as costuras pretas da versao antiga.
+         * Continua obedecendo AA_EN da ROM e pode ser desligada para A/B. */
+        g_aa_experimental = !e || atoi(e) != 0;
     }
     return g_aa_experimental;
 }
@@ -1107,7 +1166,12 @@ static void pintar_retangulo(uint8_t* rdram, uint32_t ulx, uint32_t uly,
             uint32_t off = g_cimg_addr + (y * g_cimg_larg + x) * 2;
             if (off + 2 > 0x800000u) return;
             *(uint16_t*)(rdram + (off ^ 2)) = cor;   /* `^2`: ordem da RDRAM */
-            if (x < 320u && y < 240u) g_aa_cobertura[y * 320u + x] = 0;
+            if (x < 320u && y < 240u) {
+                uint32_t ci = y * 320u + x;
+                g_aa_cobertura[ci] = 0;
+                g_aa_amostras_hires[ci] = 0;
+                g_aa_z_valida[ci] = 0;
+            }
             g_pixels_pintados++;
         }
     }
@@ -1131,6 +1195,8 @@ static void limpar_alvo_entrada_3d(uint8_t* rdram) {
     }
     aa_preparar_alvo();
     memset(g_aa_cobertura, 0, sizeof(g_aa_cobertura));
+    memset(g_aa_amostras_hires, 0, sizeof(g_aa_amostras_hires));
+    memset(g_aa_z_valida, 0, sizeof(g_aa_z_valida));
 }
 
 /* Le da RDRAM respeitando a troca de bytes por palavra. */
@@ -1138,6 +1204,8 @@ static uint8_t ram8(uint8_t* rdram, uint32_t off)  { return rdram[off ^ 3]; }
 static uint16_t ram16(uint8_t* rdram, uint32_t off) {
     return *(uint16_t*)(rdram + (off ^ 2));
 }
+
+static void mtx_preparar(void);
 
 /* F3DEX deposita Light em MOVEMEM 0x86, 0x88, ...: RGB em 0..2 e vetor
  * direcional assinado em 8..10. A cutscene usa tres luzes direcionais e uma
@@ -1178,9 +1246,18 @@ static void f3d_iluminar_vertice(f3d_vertex_t* v) {
     for (uint32_t i = 0; i < limite; i++) {
         if (!g_luz[i].valido) continue;
         float lx = (float)g_luz[i].x, ly = (float)g_luz[i].y, lz = (float)g_luz[i].z;
+        /* Fast3D leva a direcao ao espaco da normal pelo inverso da
+         * modelview. Esta e a mesma operacao de gSPUpdateLightVectors no
+         * GLideN64 para a convencao de matriz usada por este runtime. */
+        mtx_preparar();
+        const float (*m)[4] = g_mtx_model[g_mtx_model_i];
+        float tx = m[0][0] * lx + m[0][1] * ly + m[0][2] * lz;
+        float ty = m[1][0] * lx + m[1][1] * ly + m[1][2] * lz;
+        float tz = m[2][0] * lx + m[2][1] * ly + m[2][2] * lz;
+        lx = tx; ly = ty; lz = tz;
         float ln = lx * lx + ly * ly + lz * lz;
         if (ln < 1.0f) continue;
-        float dot = -(nx * lx + ny * ly + nz * lz) / (float)sqrt(ln);
+        float dot = (nx * lx + ny * ly + nz * lz) / (float)sqrt(ln);
         if (dot <= 0.0f) continue;
         rr += (float)g_luz[i].r * dot;
         gg += (float)g_luz[i].g * dot;
@@ -1336,7 +1413,36 @@ static void mtx_transformar_vertice(f3d_vertex_t* v) {
 /* LOADBLOCK: copia bruta da imagem de textura para a TMEM. */
 static uint64_t g_lb_chamadas = 0, g_lb_bytes = 0, g_lb_recusas = 0;
 static uint32_t g_ultima_textura = 0;
+static int g_enix_dump_inicializado = 0;
+static unsigned g_enix_dump_tiles = 0;
+static char g_enix_dump_dir[MAX_PATH];
 uint32_t rsp_ultima_textura(void) { return g_ultima_textura; }
+
+static void dump_enix_tile(uint8_t* rdram, uint32_t addr, uint32_t bytes) {
+    if (!g_enix_dump_inicializado) {
+        const char* dir = getenv("WPJ2_DUMP_ENIX_DIR");
+        g_enix_dump_inicializado = 1;
+        if (dir && *dir) {
+            snprintf(g_enix_dump_dir, sizeof(g_enix_dump_dir), "%s", dir);
+            CreateDirectoryA(g_enix_dump_dir, NULL);
+        }
+    }
+    if (!g_enix_dump_dir[0] || g_enix_dump_tiles >= 30u || bytes < 2048u) return;
+    if (g_enix_dump_tiles == 0u) {
+        char pal[MAX_PATH];
+        snprintf(pal, sizeof(pal), "%s\\palette.rgba5551", g_enix_dump_dir);
+        FILE* f = fopen(pal, "wb");
+        if (f) { fwrite(g_tmem + 0x800, 1, 0x200, f); fclose(f); }
+    }
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%s\\tile_%02u.ci8", g_enix_dump_dir,
+             g_enix_dump_tiles);
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    for (uint32_t i = 0; i < 2048u; i++) fputc(ram8(rdram, addr + i), f);
+    fclose(f);
+    g_enix_dump_tiles++;
+}
 
 /* Amostra agregada das origens reais de LOADBLOCK. O ultimo SETTIMG nao e
  * necessariamente aquele que desenhou os sprites; esta tabela conserva cada
@@ -1425,9 +1531,10 @@ static void carregar_bloco(uint8_t* rdram, uint32_t tile, uint32_t lrs, uint32_t
                       (int16_t)rsp_rdram16(rdram, 0x001A723Cu) == 50;
     int mosaico_ci8_8_1 = (int16_t)rsp_rdram16(rdram, 0x001A7234u) == 8 &&
                            (int16_t)rsp_rdram16(rdram, 0x001A723Cu) == 1 &&
-                           g_timg_fmt == 2u && g_timg_siz == 1u && dxt == 0x100u &&
-                           g_tile[tile & 7u].linha == 8u;
+                           g_timg_addr == 0x002B64B0u && bytes == 2048u &&
+                           dxt == 0x100u;
     if (mosaico_ci8_8_1) {
+        dump_enix_tile(rdram, g_timg_addr, bytes);
         const char* e = getenv("WPJ2_CI8_DXT_8_1");
         if (!e || atoi(e) != 0)
             tmem_intercalar_ci8_linhas(dst, bytes, g_tile[tile & 7u].linha * 8u);
@@ -1597,6 +1704,33 @@ static int tile_aplicar_shift(int coord, uint32_t shift) {
     return coord << (16u - shift);
 }
 
+/* Vtx::tc e S10.5 e gSPTexture fornece escala unsigned 0.16. Conservamos a
+ * coordenada em 1/64 de texel ate consultar o tile. Com 0x8000, usado pelos
+ * modelos desta ROM, o valor permanece igual; os demais valores deixam de
+ * depender da antiga coincidencia de dividir sempre por 64. */
+static int texture_aplicar_escala(int coord, uint16_t escala) {
+    uint32_t e = escala ? (uint32_t)escala : 0x10000u;
+    int64_t produto = (int64_t)coord * (int64_t)e;
+    return (int)(produto >= 0 ? (produto + 0x4000) / 0x8000
+                              : (produto - 0x4000) / 0x8000);
+}
+
+static uint8_t cor_3p_canal8(uint16_t c00, uint16_t c10, uint16_t c01,
+                              uint16_t c11, unsigned desloc,
+                              uint32_t fs, uint32_t ft) {
+    int a = (int)(((c00 >> desloc) & 31u) * 255u / 31u);
+    int b = (int)(((c10 >> desloc) & 31u) * 255u / 31u);
+    int c = (int)(((c01 >> desloc) & 31u) * 255u / 31u);
+    int d = (int)(((c11 >> desloc) & 31u) * 255u / 31u);
+    int valor;
+    if (fs + ft < 64u)
+        valor = a + ((int)fs * (b - a) + (int)ft * (c - a) + 32) / 64;
+    else
+        valor = d + ((int)(64u - fs) * (c - d) +
+                     (int)(64u - ft) * (b - d) + 32) / 64;
+    return (uint8_t)(valor < 0 ? 0 : valor > 255 ? 255 : valor);
+}
+
 static int tex_filter_forcado(void) {
     if (g_tex_filter_forcado == -2) {
         const char* e = getenv("WPJ2_TEX_FILTER");
@@ -1697,7 +1831,8 @@ static comb_rgb_t comb_ciclo(uint32_t a_sel, uint32_t b_sel, uint32_t c_sel,
     return out;
 }
 
-static uint16_t comb_aplicar(uint16_t texel, int sr, int sg, int sb, int sa) {
+static uint16_t comb_aplicar(uint16_t texel, int sr, int sg, int sb, int sa,
+                             int* out_r, int* out_g, int* out_b) {
     comb_rgb_t texture = comb_cor_5551(texel);
     comb_rgb_t shade = { comb_clamp(sr), comb_clamp(sg), comb_clamp(sb) };
     comb_rgb_t prim = comb_cor_word(g_prim_color);
@@ -1718,14 +1853,16 @@ static uint16_t comb_aplicar(uint16_t texel, int sr, int sg, int sb, int sa) {
                                    texture, prim, shade, env, tex_a, sa, prim_a, env_a);
     comb_rgb_t out = comb_ciclo(a1, b1, c1, d1, first,
                                  texture, prim, shade, env, tex_a, sa, prim_a, env_a);
+    if (out_r) *out_r = out.r;
+    if (out_g) *out_g = out.g;
+    if (out_b) *out_b = out.b;
     return (uint16_t)(((out.r * 31u / 255u) << 11) |
                       ((out.g * 31u / 255u) <<  6) |
                       ((out.b * 31u / 255u) <<  1) | (texel & 1u));
 }
 
 /* TRI1 do F3DEX antigo referencia cada entrada pelo indice multiplicado por
- * dez. A textura e interpolada de forma afim, suficiente para os quads planos
- * do boot. */
+ * dez. A rota 3D respeita G_TP_PERSP; quads 2D continuam afins. */
 static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
                                     const f3d_vertex_t* b, const f3d_vertex_t* c) {
     g_tarefa_tri_recebidos++;
@@ -1747,13 +1884,18 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
     }
     const tile_t* T = &g_tile[g_texture_tile & 7u];
     registrar_tri_source(T, a, b, c);
-    int ax = a->usa_matriz ? (int)(a->sx + 0.5f) : 160 + a->x;
-    int ay = a->usa_matriz ? (int)(a->sy + 0.5f) : 120 - a->y;
-    int bx = b->usa_matriz ? (int)(b->sx + 0.5f) : 160 + b->x;
-    int by = b->usa_matriz ? (int)(b->sy + 0.5f) : 120 - b->y;
-    int cx = c->usa_matriz ? (int)(c->sx + 0.5f) : 160 + c->x;
-    int cy = c->usa_matriz ? (int)(c->sy + 0.5f) : 120 - c->y;
-    int area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    /* O RDP conserva coordenadas subpixel; arredondar cada vertice para um
+     * pixel inteiro antes de calcular coverage criava escadas mesmo com
+     * quatro amostras. Quarto de pixel coincide com a grade 2x2 usada abaixo
+     * e preserva a geometria projetada ate a decisao de cobertura. */
+    int ax = a->usa_matriz ? (int)lrintf(a->sx * 4.0f) : (160 + a->x) * 4;
+    int ay = a->usa_matriz ? (int)lrintf(a->sy * 4.0f) : (120 - a->y) * 4;
+    int bx = b->usa_matriz ? (int)lrintf(b->sx * 4.0f) : (160 + b->x) * 4;
+    int by = b->usa_matriz ? (int)lrintf(b->sy * 4.0f) : (120 - b->y) * 4;
+    int cx = c->usa_matriz ? (int)lrintf(c->sx * 4.0f) : (160 + c->x) * 4;
+    int cy = c->usa_matriz ? (int)lrintf(c->sy * 4.0f) : (120 - c->y) * 4;
+    int64_t area = (int64_t)(bx - ax) * (cy - ay) -
+                   (int64_t)(by - ay) * (cx - ax);
     if (!area) return;
     /* G_CULL_FRONT/BACK nos modos geometricos do F3DEX. As coordenadas Y ja
      * foram convertidas para o framebuffer (crescem para baixo), portanto uma
@@ -1769,10 +1911,14 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
         g_tarefa_tri_cull_tras++;
         return;
     }
-    int minx = ax; if (bx < minx) minx = bx; if (cx < minx) minx = cx;
-    int maxx = ax; if (bx > maxx) maxx = bx; if (cx > maxx) maxx = cx;
-    int miny = ay; if (by < miny) miny = by; if (cy < miny) miny = cy;
-    int maxy = ay; if (by > maxy) maxy = by; if (cy > maxy) maxy = cy;
+    int minx4 = ax; if (bx < minx4) minx4 = bx; if (cx < minx4) minx4 = cx;
+    int maxx4 = ax; if (bx > maxx4) maxx4 = bx; if (cx > maxx4) maxx4 = cx;
+    int miny4 = ay; if (by < miny4) miny4 = by; if (cy < miny4) miny4 = cy;
+    int maxy4 = ay; if (by > maxy4) maxy4 = by; if (cy > maxy4) maxy4 = cy;
+    int minx = minx4 >= 0 ? minx4 / 4 : (minx4 - 3) / 4;
+    int maxx = maxx4 >= 0 ? maxx4 / 4 : (maxx4 - 3) / 4;
+    int miny = miny4 >= 0 ? miny4 / 4 : (miny4 - 3) / 4;
+    int maxy = maxy4 >= 0 ? maxy4 / 4 : (maxy4 - 3) / 4;
     if (minx < (int)g_scis_x0) minx = (int)g_scis_x0;
     if (miny < (int)g_scis_y0) miny = (int)g_scis_y0;
     if (maxx >= (int)g_scis_x1) maxx = (int)g_scis_x1 - 1;
@@ -1781,43 +1927,52 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
     if (aa_ativo) aa_preparar_alvo();
     uint64_t pixels_antes = g_triangulo_pixels;
     for (int y = miny; y <= maxy; y++) for (int x = minx; x <= maxx; x++) {
-        int wa = (bx - x) * (cy - y) - (by - y) * (cx - x);
-        int wb = (cx - x) * (ay - y) - (cy - y) * (ax - x);
-        int wc = area - wa - wb;
-        if ((area > 0 && (wa < 0 || wb < 0 || wc < 0)) ||
-            (area < 0 && (wa > 0 || wb > 0 || wc > 0))) continue;
-        /* O RDP pediu AA_EN na malha 3D.  No interior a cobertura e sempre
-         * total; so nas proximidades de uma aresta fazemos quatro testes 2x2
-         * e misturamos o pixel parcial com o framebuffer ja existente. */
+        int64_t px4_centro = (int64_t)x * 4 + 2;
+        int64_t py4_centro = (int64_t)y * 4 + 2;
+        int64_t wa = ((int64_t)bx - px4_centro) * ((int64_t)cy - py4_centro) -
+                     ((int64_t)by - py4_centro) * ((int64_t)cx - px4_centro);
+        int64_t wb = ((int64_t)cx - px4_centro) * ((int64_t)ay - py4_centro) -
+                     ((int64_t)cy - py4_centro) * ((int64_t)ax - px4_centro);
+        int64_t wc = area - wa - wb;
+        int centro_dentro = (area > 0)
+            ? (wa >= 0 && wb >= 0 && wc >= 0)
+            : (wa <= 0 && wb <= 0 && wc <= 0);
+        if (!aa_ativo && !centro_dentro) continue;
+        /* Quatro subamostras cobrem inclusive pixels cujo centro fica fora da
+         * face. O caminho antigo descartava esses pixels antes deste teste e
+         * por isso o AA apenas escurecia o lado interno de cada triangulo. */
         int cobertura = 4;
-        if (aa_ativo &&
-            (abs(wa) <= abs(bx - cx) + abs(by - cy) + 2 ||
-             abs(wb) <= abs(cx - ax) + abs(cy - ay) + 2 ||
-             abs(wc) <= abs(ax - bx) + abs(ay - by) + 2)) {
+        uint8_t mascara_cobertura = 0x0Fu;
+        if (aa_ativo) {
             static const int sub[] = { 1, 3 };
             cobertura = 0;
+            mascara_cobertura = 0;
             for (unsigned sy = 0; sy < 2; sy++) for (unsigned sx = 0; sx < 2; sx++) {
                 int64_t px4 = (int64_t)x * 4 + sub[sx];
                 int64_t py4 = (int64_t)y * 4 + sub[sy];
-                int64_t wa4 = ((int64_t)bx * 4 - px4) * ((int64_t)cy * 4 - py4) -
-                              ((int64_t)by * 4 - py4) * ((int64_t)cx * 4 - px4);
-                int64_t wb4 = ((int64_t)cx * 4 - px4) * ((int64_t)ay * 4 - py4) -
-                              ((int64_t)cy * 4 - py4) * ((int64_t)ax * 4 - px4);
-                int64_t wc4 = (int64_t)area * 16 - wa4 - wb4;
+                int64_t wa4 = ((int64_t)bx - px4) * ((int64_t)cy - py4) -
+                              ((int64_t)by - py4) * ((int64_t)cx - px4);
+                int64_t wb4 = ((int64_t)cx - px4) * ((int64_t)ay - py4) -
+                              ((int64_t)cy - py4) * ((int64_t)ax - px4);
+                int64_t wc4 = area - wa4 - wb4;
                 if ((area > 0 && wa4 >= 0 && wb4 >= 0 && wc4 >= 0) ||
                     (area < 0 && wa4 <= 0 && wb4 <= 0 && wc4 <= 0))
+                {
                     cobertura++;
+                    mascara_cobertura |= (uint8_t)(1u << (sy * 2u + sx));
+                }
             }
             if (!cobertura) continue;
         }
         int si, ti, s_coord, t_coord;
-        /* G_TEXTURE_PERSP esta ligado na rota 3D. So vale pagar as divisoes
-         * de ponto flutuante quando W realmente varia no triangulo; nos
-         * quads 2D e nos planos paralelos a camera, o caminho inteiro afim e
-         * matematicamente identico e mantem a cadencia do prototipo. */
-        if (a->usa_matriz && b->usa_matriz && c->usa_matriz &&
+        /* RT64/TextureSampler consulta OtherMode::textPersp(): matriz sozinha
+         * nao autoriza a divisao. Isso importa em listas que alternam objetos
+         * 3D e quads de interface usando o mesmo microcodigo. */
+        int textura_perspectiva = a->usa_matriz && b->usa_matriz && c->usa_matriz &&
+                                  (g_othermode_h & G_TP_PERSP_BIT) != 0;
+        if (textura_perspectiva &&
             (fabsf(a->invw - b->invw) > 1.0e-5f ||
-             fabsf(a->invw - c->invw) > 1.0e-5f)) {
+              fabsf(a->invw - c->invw) > 1.0e-5f)) {
             float invw = ((float)wa * a->invw + (float)wb * b->invw +
                           (float)wc * c->invw) / (float)area;
             if (invw <= 1.0e-12f) continue;
@@ -1829,16 +1984,25 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
                          (float)wc * (float)c->t * c->invw) / (float)area) / invw;
             s_coord = (int)sp;
             t_coord = (int)tp;
+            g_tex_persp_pixels++;
         } else {
             int64_t ss = (int64_t)wa * a->s + (int64_t)wb * b->s + (int64_t)wc * c->s;
             int64_t tt = (int64_t)wa * a->t + (int64_t)wb * b->t + (int64_t)wc * c->t;
             s_coord = (int)(ss / area);
             t_coord = (int)(tt / area);
+            /* O shader do RT64 compensa a ausencia de divisao de perspectiva
+             * por 0,5 em triangulos (nao em TEXRECT). Reproduzir aqui evita
+             * que G_TP_NONE leia a textura com o dobro da frequencia. */
+            if (a->usa_matriz && b->usa_matriz && c->usa_matriz &&
+                !(g_othermode_h & G_TP_PERSP_BIT)) {
+                s_coord /= 2;
+                t_coord /= 2;
+            }
+            g_tex_affine_pixels++;
         }
-        /* A escala da opcode TEXTURE precisa ser correlacionada com as listas
-         * de vertices da ROM antes de ser aplicada: a mesma opcode tambem
-         * ocorre na abertura ortografica. Por ora preservamos S/T nativos e
-         * isolamos a investigacao ao layout CI/DXT da TMEM. */
+        /* A escala de gSPTexture e parte do estado Fast3D; ela e aplicada
+         * abaixo somente ao caminho triangulado. TEXRECT traz seus proprios
+         * incrementos 10.5 e nao consulta esta escala. */
         int semantica_texture_3d = g_alpha_trace_estado == 12 &&
                                    g_alpha_trace_subestado == 50;
         int64_t aa = (int64_t)wa * a->a + (int64_t)wb * b->a + (int64_t)wc * c->a;
@@ -1852,17 +2016,56 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
          * o teste, a ultima face submetida atravessa todas as outras. O RDP
          * usa uma codificacao nao linear; a profundidade de viewport abaixo
          * preserva, por enquanto, a ordem de oclusao que interessa ao prototipo. */
-        if (g_f3d_z_mode && g_zimg_addr) {
-            float zf = ((float)wa * a->sz + (float)wb * b->sz + (float)wc * c->sz) /
-                       (float)area;
-            uint32_t zu = zf <= 0.0f ? 0u : zf >= 65535.0f ? 65535u : (uint32_t)(zf + 0.5f);
+        if (g_f3d_z_mode && g_zimg_addr && (g_othermode_l & (0x10u | 0x20u))) {
             uint32_t zoff = g_zimg_addr + ((uint32_t)y * g_cimg_larg + (uint32_t)x) * 2u;
             if (zoff + 2 > 0x800000u) continue;
             uint16_t anterior = *(uint16_t*)(rdram + (zoff ^ 2u));
-            if (zu > anterior) { g_z_recusados++; g_tarefa_z_recusados++; continue; }
-            *(uint16_t*)(rdram + (zoff ^ 2u)) = (uint16_t)zu;
-            g_z_aceitos++;
-            g_tarefa_z_aceitos++;
+            if (aa_ativo) {
+                uint32_t ci = (uint32_t)y * 320u + (uint32_t)x;
+                uint16_t* za = &g_aa_z_amostras[ci * 4u];
+                if (!g_aa_z_valida[ci]) {
+                    za[0] = za[1] = za[2] = za[3] = anterior;
+                    g_aa_z_valida[ci] = 1;
+                }
+                uint8_t passa = 0;
+                static const int subz[] = { 1, 3 };
+                for (unsigned s = 0; s < 4; s++) {
+                    if (!(mascara_cobertura & (1u << s))) continue;
+                    int64_t px4 = (int64_t)x * 4 + subz[s & 1u];
+                    int64_t py4 = (int64_t)y * 4 + subz[s >> 1u];
+                    int64_t zwa = ((int64_t)bx - px4) * ((int64_t)cy - py4) -
+                                  ((int64_t)by - py4) * ((int64_t)cx - px4);
+                    int64_t zwb = ((int64_t)cx - px4) * ((int64_t)ay - py4) -
+                                  ((int64_t)cy - py4) * ((int64_t)ax - px4);
+                    int64_t zwc = area - zwa - zwb;
+                    float zf = ((float)zwa * a->sz + (float)zwb * b->sz +
+                                (float)zwc * c->sz) / (float)area;
+                    uint16_t zu = (uint16_t)(zf <= 0.0f ? 0u :
+                        zf >= 65535.0f ? 65535u : (uint32_t)(zf + 0.5f));
+                    if ((g_othermode_l & 0x10u) && zu > za[s]) continue;
+                    passa |= (uint8_t)(1u << s);
+                    if (g_othermode_l & 0x20u) za[s] = zu;
+                }
+                if (!passa) { g_z_recusados++; g_tarefa_z_recusados++; continue; }
+                mascara_cobertura = passa;
+                if (g_othermode_l & 0x20u) {
+                    uint16_t zmin = za[0];
+                    for (unsigned s = 1; s < 4; s++) if (za[s] < zmin) zmin = za[s];
+                    *(uint16_t*)(rdram + (zoff ^ 2u)) = zmin;
+                }
+                g_z_aceitos++; g_tarefa_z_aceitos++;
+            } else {
+                float zf = ((float)wa * a->sz + (float)wb * b->sz + (float)wc * c->sz) /
+                           (float)area;
+                uint16_t zu = (uint16_t)(zf <= 0.0f ? 0u :
+                    zf >= 65535.0f ? 65535u : (uint32_t)(zf + 0.5f));
+                if ((g_othermode_l & 0x10u) && zu > anterior) {
+                    g_z_recusados++; g_tarefa_z_recusados++; continue;
+                }
+                if (g_othermode_l & 0x20u)
+                    *(uint16_t*)(rdram + (zoff ^ 2u)) = zu;
+                g_z_aceitos++; g_tarefa_z_aceitos++;
+            }
         }
         /* Vtx::tc usa 5.10, ao contrario dos parametros 10.5 de TEXRECT.
          * A logo mede 32x64 no SETTILESIZE e traz extremos 2048/4096; portanto
@@ -1870,6 +2073,8 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
          * linhas vizinhas da TMEM. */
         int smax = (int)((T->lrs - T->uls) >> 2);
         int tmax = (int)((T->lrt - T->ult) >> 2);
+        s_coord = texture_aplicar_escala(s_coord, g_texture_scale_s);
+        t_coord = texture_aplicar_escala(t_coord, g_texture_scale_t);
         s_coord = tile_aplicar_shift(s_coord, T->shifts);
         t_coord = tile_aplicar_shift(t_coord, T->shiftt);
         si = tile_coord((s_coord >> 6) - (int)(T->uls >> 2), smax + 1, T->masks, T->cms);
@@ -1889,6 +2094,9 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
             : (!g_texture_definida_na_tarefa || g_texture_ligada != 0);
         uint16_t cor = textura_ativa ? texel(T, (uint32_t)si, (uint32_t)ti, &ok) : 0xFFFFu;
         if (!ok || (textura_ativa && !(cor & 1))) continue;
+        int tex_r8 = (int)(((cor >> 11) & 31u) * 255u / 31u);
+        int tex_g8 = (int)(((cor >> 6) & 31u) * 255u / 31u);
+        int tex_b8 = (int)(((cor >> 1) & 31u) * 255u / 31u);
         int filtro_tri = g_tex_filter;
         if (semantica_texture_3d) {
             int forcar_3d = tex_filter_3d_forcado();
@@ -1908,14 +2116,12 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
             uint16_t c11 = texel(T, (uint32_t)si1, (uint32_t)ti1, &ok11);
             if (ok10 && ok01 && ok11 && (c10 & 1u) && (c01 & 1u) && (c11 & 1u)) {
                 uint32_t fs = (uint32_t)(s_coord & 63), ft = (uint32_t)(t_coord & 63);
-                uint32_t w00 = (64u - fs) * (64u - ft), w10 = fs * (64u - ft);
-                uint32_t w01 = (64u - fs) * ft, w11 = fs * ft;
-                uint32_t r = (((cor >> 11) & 31u) * w00 + ((c10 >> 11) & 31u) * w10 +
-                              ((c01 >> 11) & 31u) * w01 + ((c11 >> 11) & 31u) * w11 + 2048u) >> 12;
-                uint32_t g = (((cor >> 6) & 31u) * w00 + ((c10 >> 6) & 31u) * w10 +
-                              ((c01 >> 6) & 31u) * w01 + ((c11 >> 6) & 31u) * w11 + 2048u) >> 12;
-                uint32_t b = (((cor >> 1) & 31u) * w00 + ((c10 >> 1) & 31u) * w10 +
-                              ((c01 >> 1) & 31u) * w01 + ((c11 >> 1) & 31u) * w11 + 2048u) >> 12;
+                tex_r8 = cor_3p_canal8(cor, c10, c01, c11, 11, fs, ft);
+                tex_g8 = cor_3p_canal8(cor, c10, c01, c11, 6, fs, ft);
+                tex_b8 = cor_3p_canal8(cor, c10, c01, c11, 1, fs, ft);
+                uint32_t r = ((uint32_t)tex_r8 * 31u + 127u) / 255u;
+                uint32_t g = ((uint32_t)tex_g8 * 31u + 127u) / 255u;
+                uint32_t b = ((uint32_t)tex_b8 * 31u + 127u) / 255u;
                 cor = (uint16_t)((r << 11) | (g << 6) | (b << 1) | (cor & 1u));
             }
         }
@@ -1924,12 +2130,16 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
         int vr = (int)(rr / area), vg = (int)(gg / area), vb = (int)(bb / area);
         int combinar_rdp = g_rdp_combine_mode > 0 && g_alpha_trace_estado == 12 &&
                             g_alpha_trace_subestado == 50;
+        int r8, g8, b8;
         if (combinar_rdp) {
-            cor = comb_aplicar(cor, vr, vg, vb, va);
+            cor = comb_aplicar(cor, vr, vg, vb, va, &r8, &g8, &b8);
         } else {
-            uint16_t r5_legacy = (uint16_t)((((cor >> 11) & 31u) * (uint32_t)vr + 127u) / 255u);
-            uint16_t g5_legacy = (uint16_t)((((cor >>  6) & 31u) * (uint32_t)vg + 127u) / 255u);
-            uint16_t b5_legacy = (uint16_t)((((cor >>  1) & 31u) * (uint32_t)vb + 127u) / 255u);
+            r8 = (tex_r8 * vr + 127) / 255;
+            g8 = (tex_g8 * vg + 127) / 255;
+            b8 = (tex_b8 * vb + 127) / 255;
+            uint16_t r5_legacy = (uint16_t)(((uint32_t)r8 * 31u + 127u) / 255u);
+            uint16_t g5_legacy = (uint16_t)(((uint32_t)g8 * 31u + 127u) / 255u);
+            uint16_t b5_legacy = (uint16_t)(((uint32_t)b8 * 31u + 127u) / 255u);
             cor = (uint16_t)((r5_legacy << 11) | (g5_legacy << 6) |
                              (b5_legacy << 1) | (cor & 1u));
         }
@@ -1949,6 +2159,11 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
             r5 = (uint16_t)((r5 * (uint32_t)va + dr * (uint32_t)(255 - va) + 127u) / 255u);
             g5 = (uint16_t)((g5 * (uint32_t)va + dg * (uint32_t)(255 - va) + 127u) / 255u);
             b5 = (uint16_t)((b5 * (uint32_t)va + db * (uint32_t)(255 - va) + 127u) / 255u);
+            int dr8 = (int)(dr * 255u / 31u), dg8 = (int)(dg * 255u / 31u);
+            int db8 = (int)(db * 255u / 31u);
+            r8 = (r8 * va + dr8 * (255 - va) + 127) / 255;
+            g8 = (g8 * va + dg8 * (255 - va) + 127) / 255;
+            b8 = (b8 * va + db8 * (255 - va) + 127) / 255;
             cor = (uint16_t)((r5 << 11) | (g5 << 6) | (b5 << 1) | 1u);
         }
         /* Neste caminho o fator programado pela cena e usado como peso da
@@ -1979,25 +2194,51 @@ static void pintar_triangulo_raster(uint8_t* rdram, const f3d_vertex_t* a,
                 r5 = (uint16_t)((r5 * (255 - fog) + fr * fog + 127) / 255);
                 g5 = (uint16_t)((g5 * (255 - fog) + fg * fog + 127) / 255);
                 b5 = (uint16_t)((b5 * (255 - fog) + fb * fog + 127) / 255);
+                int fr8 = (int)(fr * 255u / 31u), fg8 = (int)(fg * 255u / 31u);
+                int fb8 = (int)(fb * 255u / 31u);
+                r8 = (r8 * (255 - fog) + fr8 * fog + 127) / 255;
+                g8 = (g8 * (255 - fog) + fg8 * fog + 127) / 255;
+                b8 = (b8 * (255 - fog) + fb8 * fog + 127) / 255;
                 cor = (uint16_t)((r5 << 11) | (g5 << 6) | (b5 << 1) | 1u);
             }
         }
         if (aa_ativo) {
             uint32_t ci = (uint32_t)y * 320u + (uint32_t)x;
-            uint8_t anterior_cobertura = g_aa_cobertura[ci];
-            if (cobertura < 4) {
-                /* A cor no framebuffer e pre-multiplicada pela cobertura.
-                 * A segunda metade de uma aresta soma sua contribuicao sobre
-                 * a primeira, eliminando a costura entre dois triangulos. */
+            g_aa_amostras_hires[ci] = semantica_texture_3d ? 1u : 0u;
+            uint16_t* amostra = &g_aa_amostras[ci * 4u];
+            uint32_t* amostra_rgb = &g_aa_amostras_rgb[ci * 4u];
+            if (!g_aa_cobertura[ci]) {
                 uint16_t dst = *(uint16_t*)(rdram + (off ^ 2));
-                uint32_t dr = (dst >> 11) & 31u, dg = (dst >> 6) & 31u, db = (dst >> 1) & 31u;
-                r5 = (uint16_t)((r5 * (uint32_t)cobertura + dr * 4u + 2u) / 4u);
-                g5 = (uint16_t)((g5 * (uint32_t)cobertura + dg * 4u + 2u) / 4u);
-                b5 = (uint16_t)((b5 * (uint32_t)cobertura + db * 4u + 2u) / 4u);
-                cor = (uint16_t)((r5 << 11) | (g5 << 6) | (b5 << 1) | 1u);
+                amostra[0] = amostra[1] = amostra[2] = amostra[3] = dst;
+                uint32_t dr8 = ((dst >> 11) & 31u) * 255u / 31u;
+                uint32_t dg8 = ((dst >> 6) & 31u) * 255u / 31u;
+                uint32_t db8 = ((dst >> 1) & 31u) * 255u / 31u;
+                uint32_t dst_rgb = (dr8 << 16) | (dg8 << 8) | db8;
+                amostra_rgb[0] = amostra_rgb[1] = amostra_rgb[2] = amostra_rgb[3] = dst_rgb;
+                g_aa_cobertura[ci] = 1;
             }
-            unsigned soma_cobertura = (unsigned)anterior_cobertura + (unsigned)cobertura;
-            g_aa_cobertura[ci] = (uint8_t)(soma_cobertura > 4u ? 4u : soma_cobertura);
+            uint32_t cor_rgb = ((uint32_t)r8 << 16) | ((uint32_t)g8 << 8) | (uint32_t)b8;
+            for (unsigned s = 0; s < 4; s++) if (mascara_cobertura & (1u << s)) {
+                amostra[s] = cor;
+                amostra_rgb[s] = cor_rgb;
+            }
+            uint32_t sr = 0, sg = 0, sb = 0;
+            for (unsigned s = 0; s < 4; s++) {
+                sr += (amostra[s] >> 11) & 31u;
+                sg += (amostra[s] >> 6) & 31u;
+                sb += (amostra[s] >> 1) & 31u;
+            }
+            r5 = (uint16_t)((sr + 2u) >> 2);
+            g5 = (uint16_t)((sg + 2u) >> 2);
+            b5 = (uint16_t)((sb + 2u) >> 2);
+            cor = (uint16_t)((r5 << 11) | (g5 << 6) | (b5 << 1) | 1u);
+        } else if ((uint32_t)x < 320u && (uint32_t)y < 240u) {
+            /* Uma escrita sem cobertura torna qualquer conjunto antigo de
+             * subamostras deste pixel obsoleto. */
+            uint32_t ci = (uint32_t)y * 320u + (uint32_t)x;
+            g_aa_cobertura[ci] = 0;
+            g_aa_amostras_hires[ci] = 0;
+            g_aa_z_valida[ci] = 0;
         }
         *(uint16_t*)(rdram + (off ^ 2)) = cor;
         g_triangulo_pixels++;
@@ -2272,6 +2513,12 @@ static void pintar_texrect(uint8_t* rdram, uint32_t tile,
                 c = (uint16_t)((sr << 11) | (sg << 6) | (sb << 1) | 1u);
             }
             *(uint16_t*)(rdram + (off ^ 2)) = c;
+            if (x < 320u && y < 240u) {
+                uint32_t ci = y * 320u + x;
+                g_aa_cobertura[ci] = 0;
+                g_aa_amostras_hires[ci] = 0;
+                g_aa_z_valida[ci] = 0;
+            }
             g_texels++;
             for (int k = 0; k < CIMG_MAX; k++)
                 if (g_destino[k].addr == g_cimg_addr) { g_destino[k].texels++; break; }
@@ -2657,6 +2904,10 @@ void rsp_gfx_report(const char* prefixo) {
            " %llu coordenada(s) negativa(s), %llu texel(es) na entrada 0\n",
            tmem_cheia, (unsigned long long)g_fora_do_tile,
            (unsigned long long)g_indice_zero);
+    printf("perspectiva de textura   : %llu pixel(es) G_TP_PERSP,"
+           " %llu pixel(es) afim(ns)\n",
+           (unsigned long long)g_tex_persp_pixels,
+           (unsigned long long)g_tex_affine_pixels);
     printf("alfa dos texeis          : %llu opaco(s), %llu transparente(s)\n",
            (unsigned long long)g_texel_opaco,
            (unsigned long long)g_texel_transparente);

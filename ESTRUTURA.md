@@ -8,6 +8,7 @@ artefatos transitórios, evidências já interpretadas e dependências externas.
 
 ```text
 project-wonder-j2-decomp/
+├── assets/                    # mapa versionado e extrações locais ignoradas
 ├── analise/                   # resultados já interpretados e consolidados
 │   ├── oraculo/               # conclusões obtidas no Project64/original
 │   └── projeto/               # conclusões obtidas no recompilado
@@ -19,6 +20,7 @@ project-wonder-j2-decomp/
 │   ├── gerado/                # fontes geradas por ferramentas
 │   ├── RecompiledFuncs/       # saída C do N64Recomp
 │   ├── RecompiledFuncsTraced/ # variante instrumentada para sondas
+│   ├── rt64_bridge/           # ponte gráfica nativa opcional para RT64
 │   ├── scripts/               # scripts próprios de análise e preparação
 │   └── tests/                 # testes unitários do runtime
 ├── temp/                      # única entrada para resultados ainda não analisados
@@ -40,6 +42,19 @@ Contém somente a implementação nativa necessária à execução: inicializaç
 escalonador, substituições de libultra, RSP/RDP, áudio, vídeo, entrada/PIF e
 integração opcional das legendas. Alterações aqui precisam de validação
 proporcional ao risco e de registro em `analise/projeto/`.
+
+### `assets/`
+
+Contém `manifest.json`, que mapeia identificadores estáveis para faixas da ROM,
+formatos nativos, símbolos/endereço e consumidores conhecidos. O extrator
+`src/scripts/extrair_assets.py` escreve bytes derivados da ROM somente em
+`assets/generated/`, ignorado pelo Git. O bruto N64 deve ser preservado mesmo
+quando existir uma representação PNG, WAV ou glTF para edição.
+
+O manifesto e os scripts podem ser publicados porque não contêm o recurso em
+si. Conteúdo extraído, convertido ou aprimorado localmente não deve entrar no
+repositório. Novos recursos devem ser associados ao ponto que os carrega ou
+consome no jogo; não basta apenas exportar um arquivo sem identidade.
 
 ### `src/`
 
@@ -131,10 +146,29 @@ Ao final de cada ciclo, `temp/` deve voltar a conter somente `README.md`.
 
 - É o substituto único do antigo `JOGAR.bat`.
 - Sem argumento, executa o perfil atual definido no próprio arquivo.
+- Sem argumento, o backend gráfico padrão é RT64; a ausência/falha da ponte
+  cai automaticamente no CPU. `TESTAR.bat cpu` força o rasterizador antigo
+  para comparações.
 - Perfis especializados podem ser selecionados por argumento, por exemplo
   `TESTAR.bat legendas` ou `TESTAR.bat audio_rsp_exato`.
+- `TESTAR.bat rt64_ref` executa a referência gráfica isolada do projeto
+  `Vmarcelo49/wpj2-recomp`: ROM japonesa, RT64/Vulkan no Debian WSL e sem a
+  tradução dinâmica. Esse perfil serve para comparação, não substitui o
+  backend CPU padrão nem o protótipo estável.
+- O runtime deste projeto usa vídeo RT64 nativo por padrão. Áudio, PT-BR,
+  entrada, Controller Pak e saves continuam locais. Compile com
+  `tools\build_probe.cmd rt64`; DLL e dependências ficam somente em
+  `build\rt64_runtime`.
+- F5 captura a área cliente realmente composta pelo RT64, inclusive após
+  redimensionamento, e mantém no mesmo perfil os metadados/RDRAM/AList.
+- A janela é redimensionável, preserva a proporção 4:3 durante o arraste e tem
+  cliente mínimo de 320×240. Segurar F11 solicita avanço de 8×; soltar restaura
+  imediatamente a cadência e o áudio normais.
 - A janela não possui limite artificial de tempo; fechá-la encerra o teste e o
   terminal associado.
+- `F2` sobrescreve `sav/bookmarks/quick.replay`, sua imagem e metadados. `F4`
+  pede ao próprio `TESTAR.bat` um reinício e reproduz em turbo as entradas até
+  o ponto salvo. Ele não restaura RDRAM sobre fibers antigas.
 - O script limpa os artefatos antigos do perfil antes da execução, mas a
   limpeza final de toda a pasta `temp` ocorre somente depois da análise.
 - Quando uma hipótese exigir outra configuração, modificar este arquivo e
@@ -169,6 +203,6 @@ terceiras clonadas em `tools/`.
   `rom_offset` servem à auditoria, não à seleção em runtime.
 - O catálogo conhecido foi processado, mas ainda há revisão humana, recursos
   dinâmicos não observados e traduções maiores que o bloco inglês.
-- O áudio ainda possui chiado intermitente e deve seguir as evidências de
-  `ANALISE_AUDIO.md`, sem reiniciar hipóteses já descartadas.
+- O áudio usa por padrão o microcódigo nativo validado; estalos esparsos são
+  refinamento de fidelidade, documentado em `ANALISE_AUDIO.md`.
 - Lacunas visuais adiadas estão em `PENDENCIAS.md`.

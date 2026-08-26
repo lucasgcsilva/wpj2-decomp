@@ -1,243 +1,286 @@
-# Wonder Project J2 — Static Recompilation
-
-Static recompilation of **Wonder Project J2: Koruro no Mori no Jozet**
-(Nintendo 64, 1998) into native C, with a runtime that replaces the N64
-hardware instead of emulating it.
+# Wonder Project J2 — recompilação estática
 
 Recompilação estática de **Wonder Project J2: Koruro no Mori no Jozet**
-(Nintendo 64, 1998) para C nativo, com um runtime que substitui o hardware do
-N64 em vez de emulá-lo.
+(Nintendo 64, 1996) para código nativo no Windows. O código MIPS é convertido
+antecipadamente pelo N64Recomp; o runtime deste projeto implementa os serviços
+do N64 e usa RT64/Vulkan como backend gráfico padrão.
+
+> Static recompilation of *Wonder Project J2* for Windows. Game code is
+> translated ahead of time, while the local runtime provides N64 services,
+> PT-BR text, audio, input, Controller Pak and RT64 graphics.
 
 | | | |
 |---|---|---|
-| ![Logo](docs/01-logo-enix.png) | ![Title](docs/02-titulo.png) | ![3D corridor](docs/03-corredor-3d.png) |
-| Opening / Abertura | Title / Título | 3D corridor / Corredor 3D |
+| ![Abertura ENIX pelo RT64](docs/01-logo-enix.png) | ![Título pelo RT64](docs/02-titulo.png) | ![Corredor 3D e diálogo PT-BR pelo RT64](docs/03-corredor-3d.png) |
+| Abertura / Opening | Título / Title | RT64 + PT-BR |
 
-*Frames rendered by the software rasterizer in this repository.*
-*Quadros renderizados pelo rasterizador em software deste repositório.*
-
----
-
-## What this is / O que é
-
-**EN** — This is not an emulator. The game's MIPS code is translated to C
-ahead of time by [N64Recomp](https://github.com/N64Recomp/N64Recomp), and the
-libultra calls it makes (threads, DMA, RSP tasks, video, audio, controller)
-are answered by a runtime written from scratch in this repository. The RSP
-graphics and audio microcode are interpreted in C; the RDP is rasterized in
-software.
-
-The project is developed by measurement, not by guesswork. Every claim in the
-documentation is backed by an experiment, and hypotheses that failed are kept
-on record with the reason — so nobody pays for them twice.
-
-**PT** — Isto não é um emulador. O código MIPS do jogo é traduzido para C
-antecipadamente pelo [N64Recomp](https://github.com/N64Recomp/N64Recomp), e as
-chamadas de libultra que ele faz (threads, DMA, tarefas de RSP, vídeo, áudio,
-controle) são atendidas por um runtime escrito do zero neste repositório. O
-microcódigo de RSP para gráficos e áudio é interpretado em C; o RDP é
-rasterizado em software.
-
-O projeto é conduzido por medição, não por suposição. Toda afirmação na
-documentação tem um experimento por trás, e as hipóteses que falharam ficam
-registradas com o motivo — para ninguém pagar por elas duas vezes.
+*Capturas do runtime atual com RT64. Não são imagens do rasterizador CPU
+antigo nem do Project64.*
 
 ---
 
-## Progress / Evolução
+## Estado atual
 
-> Only Phase 1 is being scored. Work belonging to later phases may already be
-> underway (the PT-BR translation, for example), but their percentages stay at
-> zero until Phase 1 closes.
->
-> Só a Fase 1 é pontuada. Trabalho de fases posteriores pode já estar em
-> andamento (a tradução PT-BR, por exemplo), mas as porcentagens ficam zeradas
-> até a Fase 1 fechar.
+O protótipo já inicializa e percorre a abertura com vídeo RT64, áudio nativo,
+tradução PT-BR, controles completos e Controller Pak. O backend CPU anterior
+continua disponível para diagnóstico, mas RT64 é o padrão.
 
-### Phase 1 — Working prototype / Protótipo funcional — `96%`
+- vídeo RT64/Vulkan com fallback para o rasterizador CPU;
+- áudio pelo microcódigo recompilado do jogo, com raros estalos residuais;
+- botões digitais, analógico e C-Buttons;
+- Controller Pak e persistência normal do jogo;
+- tradução PT-BR dinâmica, incluindo caracteres acentuados;
+- bookmark seguro por reinício/replay em F2/F4;
+- janela redimensionável em 4:3 e avanço momentâneo de até 8×.
 
-`███████████████████░` 96%
+Este ainda é um projeto de desenvolvimento. É necessário fornecer a própria
+ROM e ainda não existe uma validação jogável completa até o final do jogo.
 
-**EN** — Get the game running end to end, however rough. Boot, threads,
-scheduler, DMA, display lists, rasterizer, audio synthesis, input.
+---
 
-**PT** — Colocar o jogo rodando de ponta a ponta, ainda que tosco. Boot,
-threads, escalonador, DMA, listas de exibição, rasterizador, síntese de áudio,
-entrada.
+## Progresso
 
-| | |
+As porcentagens são estimativas ponderadas de engenharia, não a proporção de
+linhas de código decompiladas. Uma implementação pode participar de mais de
+uma fase: a tradução, por exemplo, é modernização na Fase 4, mas a fidelidade
+da paginação e do posicionamento pertence à Fase 2.
+
+| Fase | Progresso | Objetivo |
+|---|---:|---|
+| 1. Protótipo funcional | **99%** | Executar o jogo de ponta a ponta, mesmo com imperfeições |
+| 2. Fidelidade de execução | **85%** | Reproduzir vídeo, áudio, timing e interface como o N64 |
+| 3. Extração total | **15%** | Mapear código e recursos sem regiões opacas |
+| 4. Modernização para PC | **45%** | GPU, idiomas, resoluções, recursos e experiência nativa |
+
+### Fase 1 — Protótipo funcional — `99%`
+
+`███████████████████▓` 99%
+
+Concluídos: boot, escalonador por fibers, PI/SI/SP/DP/VI/AI, DMA, tarefas
+gráficas e de áudio, entrada, Controller Pak, persistência, RT64 e execução da
+abertura/cenas já verificadas.
+
+Para chegar a 100%:
+
+- realizar uma campanha completa até o final;
+- corrigir qualquer travamento bloqueante ou subsistema ainda não alcançado.
+
+### Fase 2 — Fidelidade de execução — `85%`
+
+`█████████████████░░░` 85%
+
+RT64 resolveu as principais diferenças de materiais, iluminação,
+anti-aliasing, transições e animações 2D/3D. O áudio, controles e cadência estão
+funcionais e próximos da referência.
+
+Para chegar a 100%:
+
+- corrigir paginação, scroll e posicionamento de textos PT-BR longos;
+- substituir corretamente os rótulos gráficos `Day` e `Progress`;
+- eliminar os raros estalos restantes do áudio;
+- comparar timing, menus e cenas tardias durante uma campanha completa;
+- fechar regressões visuais ou de input descobertas nesse percurso.
+
+### Fase 3 — Extração total — `15%`
+
+`███░░░░░░░░░░░░░░░░░` 15%
+
+Já existem manifesto e extrator de assets, contêiner da fonte mapeado, bancos
+de texto integrados e faixas de sequências, tabelas, samples e bancos de áudio
+identificadas. Símbolos, callgraph e funções recompiladas também possuem
+instrumentação própria.
+
+Para chegar a 100%:
+
+- inventariar e extrair todas as texturas, sprites, paletas, modelos, áudio e
+  scripts no formato nativo;
+- associar cada asset ao loader e consumidor correspondente;
+- decodificar os contêineres hoje apenas mapeados;
+- identificar overlays, estruturas e símbolos restantes;
+- substituir progressivamente regiões recompiladas opacas por código nativo
+  compreendido e documentado;
+- tornar a extração reproduzível a partir de uma ROM fornecida pelo usuário.
+
+### Fase 4 — Modernização para PC — `45%`
+
+`█████████░░░░░░░░░░░` 45%
+
+Já entregues: backend GPU RT64, janela redimensionável, tradução PT-BR
+carregada externamente, caracteres acentuados, captura F5, avanço F11,
+controles de PC, Controller Pak e bookmark por replay.
+
+Para chegar a 100%:
+
+- adicionar opções de resolução interna, upscale e filtros do RT64;
+- implementar widescreen e ultrawide sem deformar HUD ou câmeras;
+- permitir pacotes de texturas, sprites e fontes em alta resolução;
+- finalizar a revisão PT-BR e estruturar seleção de idiomas externos;
+- substituir o bookmark experimental por save-states robustos, se viável;
+- criar configuração de controles, áudio, vídeo e Controller Pak;
+- preparar empacotamento, instalador e experiência de release para Windows.
+
+---
+
+## Como funciona
+
+| Camada | Implementação atual |
 |---|---|
-| Boot and libultra core | ✅ |
-| Thread scheduler (Windows fibers) | ✅ |
-| PI / SI / SP / DP / VI / AI | ✅ |
-| F3DEX display lists, RDP rasterizer | ✅ |
-| Audio synthesis (ABI1) | ⚠️ audible hiss under investigation |
-| Controller input | ⚠️ reaches the PIF, game stops polling |
+| Código do jogo | MIPS convertido para C pelo N64Recomp |
+| Libultra e hardware | Runtime próprio: threads, filas, DMA e registradores |
+| RSP gráfico | Tarefas reais do jogo encaminhadas ao RT64 |
+| RDP e apresentação | RT64/Vulkan por padrão; rasterizador CPU para A/B |
+| RSP de áudio | Microcódigo recompilado, executado localmente |
+| Entrada e saves | PIF, analógico, C-Buttons e Controller Pak locais |
+| Texto | Catálogo PT-BR externo aplicado no consumidor do jogo |
 
-### Phase 2 — Execution fidelity / Fidelidade de execução — `0%`
-
-`░░░░░░░░░░░░░░░░░░░░` 0%
-
-**EN** — Make it behave like the original: correct materials, transitions,
-timing, and audio that matches the hardware.
-
-**PT** — Fazer executar como o original: materiais corretos, transições,
-temporização e áudio igual ao do hardware.
-
-### Phase 3 — Full extraction / Extração total — `0%`
-
-`░░░░░░░░░░░░░░░░░░░░` 0%
-
-**EN** — Replace the recompiled blob with fully understood native code and
-extracted assets. No opaque regions left.
-
-**PT** — Substituir o bloco recompilado por código nativo compreendido e
-recursos extraídos. Sem regiões opacas.
-
-### Phase 4 — Platform modernization / Modernização — `0%`
-
-`░░░░░░░░░░░░░░░░░░░░` 0%
-
-**EN** — Widescreen and ultrawide, GPU backend, higher-resolution textures and
-sprites, translations.
-
-**PT** — Widescreen e ultrawide, backend de GPU, texturas e sprites em
-resolução maior, traduções.
+O Project64 é usado como oráculo comportamental. Resultados analisados são
+consolidados em `analise/`; saídas descartáveis entram somente em `temp/`.
+Hipóteses rejeitadas permanecem documentadas para não serem repetidas.
 
 ---
 
-## Requirements / Requisitos
+## Requisitos
 
-**EN** — You must supply your own copy of the ROM. Nothing derived from it is
-distributed here: no ROM, no recompiled output, no extracted text, palettes or
-textures.
+- Windows x64;
+- Visual Studio 2022 ou Build Tools com compilador C/C++;
+- CMake e Ninja para a ponte RT64;
+- GPU e driver com suporte a Vulkan;
+- Python 3;
+- uma cópia legal da ROM compatível, fornecida pelo próprio usuário.
 
-**PT** — Você precisa fornecer sua própria cópia da ROM. Nada derivado dela é
-distribuído aqui: nem ROM, nem saída do recompilador, nem textos, paletas ou
-texturas extraídos.
-
-- Windows, Visual Studio 2022 (Build Tools are enough)
-- Python 3
-- [N64Recomp](https://github.com/N64Recomp/N64Recomp) — generates the C from
-  the ROM
+ROM, fontes recompiladas e assets extraídos não são distribuídos. As imagens
+em `docs/` são apenas capturas reduzidas para documentação.
 
 ---
 
-## Building / Compilando
+## Compilar e executar
 
 ```bat
-:: 1. Configure paths (ROM, MSVC, Python)
+:: 1. Configure os caminhos locais de ROM, MSVC e Python
 tools\env.cmd
 
-:: 2. Generate the recompiled C from your ROM, then build
-tools\build_probe.cmd
+:: 2. Gere/recompile o código e construa também a ponte RT64
+tools\build_probe.cmd rt64
 
-:: 3. Run the current test profile with a window and keyboard
+:: 3. Execute o perfil padrão
 TESTAR.bat
 ```
 
-### Keyboard / Teclado
+`TESTAR.bat cpu` força o rasterizador antigo para comparação. Se a ponte RT64
+não carregar, o runtime também retorna automaticamente ao backend CPU.
 
-| Key | N64 |
+### Controles
+
+| Tecla | Nintendo 64 |
 |---|---|
 | Enter | START |
-| X / Space | A |
+| X / Espaço | A |
 | Z | B |
 | C | Z trigger |
-| A / S | L / R |
-| Arrows | D-Pad |
+| Q / E | L / R |
+| W / A / S / D | D-Pad |
+| Setas | Analógico |
+| I / J / K / L | C-Up / C-Left / C-Down / C-Right |
 
-`F5` frame capture · `F6` history · `F2`/`F4` checkpoint · `F11` cycle audio voice
+| Atalho | Função de desenvolvimento |
+|---|---|
+| F2 | Substitui o bookmark rápido por replay |
+| F4 | Reinicia e reproduz as entradas até o bookmark |
+| F5 | Captura imagem e estado de diagnóstico |
+| F6 | Captura histórico gráfico |
+| F11 pressionado | Avanço nominal de 8×; soltar volta ao normal |
+
+F2/F4 não são save-states tradicionais: o retorno seguro reinicia o runtime e
+reproduz entradas, evitando restaurar RDRAM sobre fibers incompatíveis.
 
 ---
 
-## Layout / Estrutura
+## Estrutura do projeto
 
-| Path | |
+| Caminho | Finalidade |
 |---|---|
-| `runtime/` | The runtime: scheduler, HLE, RSP/RDP, audio, video, PIF |
-| `src/` | Project-owned scripts, tests, generated recompilation sources and build configuration |
-| `textos/` | Local, ROM-derived text catalogs; intentionally ignored by Git |
-| `analise/` | Consolidated, already-reviewed findings split by project/oracle origin |
-| `temp/` | Disposable output from the next test; it is consumed, consolidated and cleaned |
-| `tools/` | Build scripts and third-party reference projects |
-| `TESTAR.bat` | Main entry point for interactive and diagnostic tests |
-| `*.md` | Investigation records — see below |
+| `runtime/` | Scheduler, HLE, áudio, vídeo, RT64, PIF e tradução |
+| `src/` | Fontes recompiladas locais, scripts, testes e ponte RT64 |
+| `assets/` | Manifesto publicável e extrações locais ignoradas |
+| `textos/` | Catálogos derivados da ROM, mantidos apenas localmente |
+| `analise/` | Evidências já interpretadas e consolidadas |
+| `temp/` | Resultado descartável do próximo teste |
+| `tools/` | Build, análise e projetos externos de referência |
+| `sav/` | Controller Pak, saves e bookmarks locais |
+| `TESTAR.bat` | Entrada principal de testes interativos |
 
-### Documentation / Documentação
+Leia [ESTRUTURA.md](ESTRUTURA.md) antes de criar arquivos. O fluxo obrigatório
+é: gerar em `temp/`, analisar, consolidar em `analise/` e limpar o temporário.
 
-| File | |
+### Documentação principal
+
+| Arquivo | Conteúdo |
 |---|---|
-| `RELATORIO_DECOMPILACAO.md` | Canonical status |
-| `ANALISE_AUDIO.md` | Audio investigation: what is proven, what was ruled out |
-| `ENTRADA_RETOMADA.md` | Controller input investigation |
-| `PENDENCIAS.md` | Known visual fidelity gaps |
-| `PLANEJAMENTO.md` | Planning |
-
-**EN** — The analysis documents are unusual on purpose: they record failed
-hypotheses and the measurements that killed them, plus the method traps
-already paid for. Read them before changing audio or input code — some of it
-looks wrong and is deliberately that way, with the measurement to prove it.
-
-**PT** — Os documentos de análise são incomuns de propósito: registram
-hipóteses fracassadas e as medições que as mataram, além das armadilhas de
-método já pagas. Leia antes de mexer em áudio ou entrada — parte do código
-parece errada e está assim deliberadamente, com a medição que comprova.
+| [RETOMADA.md](RETOMADA.md) | Histórico técnico e ponto atual de retomada |
+| [PENDENCIAS.md](PENDENCIAS.md) | Lacunas confirmadas ainda abertas |
+| [ANALISE_AUDIO.md](ANALISE_AUDIO.md) | Evidências e hipóteses descartadas de áudio |
+| [ESTRUTURA.md](ESTRUTURA.md) | Organização e disciplina de testes |
+| [PLANEJAMENTO.md](PLANEJAMENTO.md) | Planejamento geral |
 
 ---
 
-## References / Referências
+## Projetos e referências
 
-Used as tooling and reference. **Not vendored in this repository** — clone
-them separately if you need them.
+Dependências e referências podem existir localmente em `tools/`, mas seus
+repositórios não são incorporados ao histórico deste projeto.
 
-Usados como ferramenta e referência. **Não versionados aqui** — clone
-separadamente se precisar.
+### Recompilação e runtime
 
-| Project | Use |
+| Projeto | Uso neste trabalho |
 |---|---|
-| [N64Recomp](https://github.com/N64Recomp/N64Recomp) | MIPS → C static recompiler. Required to build. |
-| [N64ModernRuntime](https://github.com/N64Recomp/N64ModernRuntime) | Reference runtime (`librecomp` / `ultramodern`). Our native libultra replacements follow its model. |
-| [Zelda64Recomp](https://github.com/Zelda64Recomp/Zelda64Recomp) | Reference for how a working recompilation wires input and video. |
-| [Project64](https://github.com/project64/project64) | Emulator, used as a behavioural oracle for graphics and audio comparisons. |
-| [wonder](https://github.com/LLONSIT-glitch/wonder) | Wonder Project J2 decompilation reference used to confirm game functions and improve text, audio, graphics and input mappings. |
-| [libreultra](https://github.com/n64decomp/libreultra) | Open libultra implementation used as an API and behaviour reference. |
-| [sdk-tools](https://github.com/n64decomp/sdk-tools) | Nintendo 64 SDK analysis tools used as an additional decompilation reference. |
+| [N64Recomp](https://github.com/N64Recomp/N64Recomp) | Recompilação estática MIPS → C |
+| [RT64](https://github.com/rt64/rt64) | Backend gráfico Vulkan atualmente usado por padrão |
+| [N64ModernRuntime](https://github.com/N64Recomp/N64ModernRuntime) | Modelo de runtime e integração moderna |
+| [RecompFrontend](https://github.com/N64Recomp/RecompFrontend) | Referência para frontend e configuração de recompilações |
+| [o1heap](https://github.com/N64Recomp/o1heap) | Referência de alocador determinístico para runtimes recompilados |
+| [Zelda64Recomp](https://github.com/Zelda64Recomp/Zelda64Recomp) | Referência madura de vídeo, áudio, input e plataforma |
+
+### Wonder Project J2
+
+| Projeto | Uso neste trabalho |
+|---|---|
+| [wpj2-recomp](https://github.com/Vmarcelo49/wpj2-recomp) | Referência decisiva para RT64, RSPRecomp e runtime moderno |
+| [wonder](https://github.com/LLONSIT-glitch/wonder) | Símbolos, funções e comportamento da ROM japonesa |
+| [josette](https://github.com/Ruin0x11/josette) | Referência para formatos e extração de sprites |
+| [WPJ2 English translation](https://www.seiyuu.info/wpj2/) | Patch e texto inglês usados como base do catálogo PT-BR |
+
+### SDK e oráculos
+
+| Projeto | Uso neste trabalho |
+|---|---|
+| [Project64](https://github.com/project64/project64) | Oráculo de comportamento, gráficos, áudio e memória |
+| [libreultra](https://github.com/n64decomp/libreultra) | Semântica aberta de APIs e estruturas da libultra |
+| [sdk-tools](https://github.com/n64decomp/sdk-tools) | Ferramentas e referências do SDK do Nintendo 64 |
+
+Obrigado aos autores desses projetos e ao tradutor Ryu. Código ou dados de
+terceiros continuam sujeitos às respectivas licenças.
 
 ---
 
-## Method / Método
+## Método de trabalho
 
-**EN** — Two ideas drive the work:
-
-1. **The real microcode is the oracle.** The ROM's own RSP microcode is
-   recompiled and executed alongside our C implementation on the same audio
-   lists; a bisection finds the first command where they diverge. HLE
-   emulators are approximations and were shown to disagree with the hardware.
-2. **Measure before concluding.** Instrument noise is measured, not assumed,
-   so improvements are not confused with run-to-run variation.
-
-**PT** — Duas ideias conduzem o trabalho:
-
-1. **O microcódigo real é o oráculo.** O microcódigo de RSP da própria ROM é
-   recompilado e executado ao lado da nossa implementação em C sobre as mesmas
-   listas de áudio; uma bisseção encontra o primeiro comando em que divergem.
-   Emuladores HLE são aproximações e se mostraram discordantes do hardware.
-2. **Medir antes de concluir.** O ruído do instrumento é medido, não presumido,
-   para que melhora não seja confundida com variação entre execuções.
+1. **Executar o microcódigo real quando possível.** O áudio recompilado do
+   próprio jogo é mais confiável que aproximar comandos por HLE.
+2. **Comparar com um oráculo.** Project64, fontes de referência e capturas no
+   mesmo estado reduzem hipóteses no escuro.
+3. **Medir antes de concluir.** Desempenho, áudio e cobertura são registrados
+   junto da imagem percebida.
+4. **Preservar resultados negativos.** Uma hipótese rejeitada documentada não
+   deve voltar como tentativa sem evidência nova.
 
 ---
 
 ## Legal
 
-**EN** — This repository contains only original code and tooling. It does not
-contain, and will not accept, the ROM or any data extracted from it. You need
-your own legally obtained copy of the game to build and run anything here.
+Este repositório contém código e ferramentas originais, além de pequenas
+capturas usadas na documentação. Não contém a ROM nem pretende distribuir
+assets reutilizáveis extraídos do jogo. Para compilar e executar, use uma cópia
+legalmente obtida.
 
-**PT** — Este repositório contém apenas código e ferramentas originais. Não
-contém, e não aceitará, a ROM nem dados extraídos dela. Você precisa da sua
-própria cópia legalmente obtida do jogo para compilar e executar qualquer
-coisa aqui.
-
-Wonder Project J2 is © Enix / Givro. This project is not affiliated with or
-endorsed by the rights holders.
+Wonder Project J2 é © Enix / Givro. Este projeto não é afiliado nem endossado
+pelos detentores dos direitos.

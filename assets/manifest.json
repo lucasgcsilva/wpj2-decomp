@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "rom_layout": "Wonder Project J2 T-En by Ryu v1.0 (z64)",
+  "notes": [
+    "wonder-source descreve a ROM japonesa; as faixas abaixo foram conferidas estruturalmente na ROM T-En antes da extração",
+    "offset e size são bytes, com números em hexadecimal representados como strings"
+  ],
+  "assets": [
+    {
+      "id": "font_ui_segment_639b20",
+      "kind": "font_container",
+      "rom_offset": "0x00639B20",
+      "size": "0x00060E50",
+      "native_format": "SPI container / compressed objects",
+      "output": "raw/font_ui_segment_639b20.bin",
+      "runtime_mapping": {
+        "rom_symbol": "gSeg_639B20_ROM_START",
+        "vram_base": "0x80947340",
+        "loader": "SysMem_GetPhysicalAddressFromVirtual + Spi_DecompressAsset",
+        "consumers": ["D_8015F880", "func_80094230", "func_80096B38"]
+      },
+      "status": "container_mapped_font_objects_runtime_mapped"
+    },
+    {
+      "id": "audio_sequences",
+      "kind": "audio_sequences",
+      "rom_offset": "0x00730E80",
+      "size": "0x000252C0",
+      "native_format": "Nintendo 64 sequence bank",
+      "output": "raw/audio_sequences.bin",
+      "runtime_mapping": {
+        "rom_symbol": "audioSequences",
+        "consumers": ["gMusicSequenceId", "libaudio sequence player"]
+      },
+      "status": "range_mapped_not_decoded"
+    },
+    {
+      "id": "audio_table",
+      "kind": "audio_table",
+      "rom_offset": "0x00756140",
+      "size": "0x000034D0",
+      "native_format": "Nintendo 64 audio table",
+      "output": "raw/audio_table.bin",
+      "runtime_mapping": {
+        "rom_symbol": "audioTblStart",
+        "consumers": ["libaudio bank initialization"]
+      },
+      "status": "range_mapped_not_decoded"
+    },
+    {
+      "id": "audio_sample_data",
+      "kind": "audio_samples",
+      "rom_offset": "0x00759610",
+      "size": "0x0002C960",
+      "native_format": "ADPCM sample data",
+      "output": "raw/audio_sample_data.bin",
+      "runtime_mapping": {
+        "consumers": ["audioTblStart", "ABI1 ADPCM decoder"]
+      },
+      "status": "range_mapped_not_decoded"
+    },
+    {
+      "id": "audio_bank",
+      "kind": "audio_bank",
+      "rom_offset": "0x00785F70",
+      "size": "0x00004C00",
+      "native_format": "Nintendo 64 instrument bank",
+      "output": "raw/audio_bank.bin",
+      "runtime_mapping": {
+        "rom_symbol": "audioBankStart",
+        "consumers": ["libaudio bank initialization"]
+      },
+      "status": "range_mapped_not_decoded"
+    },
+    {
+      "id": "ryu_text_bank",
+      "kind": "text_bank",
+      "rom_offset": "0x00800000",
+      "size": "0x00020000",
+      "native_format": "Ryu T-En text/control stream",
+      "output": "raw/ryu_text_bank.bin",
+      "runtime_mapping": {
+        "consumers": ["func_80096B38", "func_8008EDA4", "runtime/legendas.c"]
+      },
+      "status": "mapped_and_integrated_ptbr"
+    }
+  ],
+  "runtime_assets": [
+    {
+      "id": "enix_logo_composed_native",
+      "kind": "logo_composite",
+      "state": "8/1",
+      "native_size": "51x60",
+      "native_format": "RGBA5551 composed from animated textured geometry",
+      "output": "images/enix_logo/enix_logo_native.rgba5551",
+      "preview": "images/enix_logo/enix_logo_native.png",
+      "runtime_mapping": {
+        "framebuffer": "0x00200000",
+        "reference_gfx": 200,
+        "consumer": "Fast3D/RDP opening logo sequence"
+      },
+      "status": "exported_from_native_runtime_composition"
+    }
+  ]
+}

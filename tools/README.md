@@ -7,6 +7,12 @@ O scanner é deliberadamente conservador: seus candidatos são insumos para a
 validação de segmentos e não devem ser usados diretamente para gerar
 `wpj2.syms.toml`.
 
+`wpj2-recomp/` é a cópia local da recompilação independente de
+`Vmarcelo49/wpj2-recomp`. Ela serve como referência para a integração de RT64,
+N64ModernRuntime, RSPRecomp e SDL2. A auditoria está consolidada em
+`../analise/projeto/referencia_wpj2_recomp_vmarcelo.md`; o projeto externo é
+ignorado pelo Git e não deve ser editado como se fosse fonte local.
+
 `find_overlays.py` recebe uma hipótese explícita para o fim do boot e mostra
 as chamadas `jal` que escapam dele, junto dos trechos pós-boot decodificáveis.
 Ele não infere nem grava endereços VRAM de overlays.

@@ -1362,3 +1362,190 @@ fora de `0x8008EDA4`, filas em espera normal e registros pareados de
 `recurso_ptbr_adiado_formato`/substituição tardia. O teste unitário também
 reproduz a colisão e passou. O encerramento com código 1 foi o timeout
 deliberado do perfil sem janela, não uma falha do runtime.
+
+---
+
+# 23. RT64 integrado ao runtime principal
+
+O teste isolado de `Vmarcelo49/wpj2-recomp` provou que o RT64 reproduzia o
+corredor com qualidade próxima ao Project64, mas carregava a ROM japonesa e
+seu áudio SDL2 ficava dessincronizado. A integração definitiva foi feita na
+fronteira da `OSTask`, sem trocar o restante do projeto.
+
+`runtime/rsp.c` agora encaminha somente `M_GFXTASK` para uma interface de
+backend. Tarefas de áudio continuam no RSP recompilado local. A ponte recebe
+RDRAM, DMEM, IMEM, registradores VI, display list e microcódigo reais;
+`runtime/video.c` pede ao RT64 a apresentação na mesma janela Win32. Tradução
+PT-BR, acentuação, input, Controller Pak, saves, replay, áudio e cadência
+permanecem implementados pelo nosso runtime.
+
+Arquivos próprios adicionados:
+
+```text
+runtime/rt64_backend.c
+runtime/rt64_backend.h
+runtime/rt64_backend_api.h
+src/rt64_bridge/CMakeLists.txt
+src/rt64_bridge/wpj2_rt64_bridge.cpp
+```
+
+A ponte é uma DLL carregada dinamicamente. Sua ausência ou falha de
+inicialização mantém o backend CPU; uma display list rejeitada desativa o RT64
+para o restante da execução e retorna imediatamente à renderização CPU. Os
+artefatos pesados não ficam na raiz:
+
+```text
+build/rt64_runtime/wpj2_rt64_bridge.dll
+build/rt64_runtime/SDL2.dll
+build/rt64_runtime/dxcompiler.dll
+build/rt64_runtime/dxil.dll
+```
+
+Comandos reproduzíveis:
+
+```bat
+tools\build_probe.cmd rt64
+TESTAR.bat
+```
+
+O launcher também foi normalizado para CRLF; em LF o `cmd.exe` cortava o
+início das linhas e ignorava o perfil. O build nativo usa MSVC e Ninja. Como o
+Windows SDK instalado não expõe GPU Upload Heaps e o caminho validado usa
+Vulkan, o CMake compatibiliza apenas esse tipo do backend D3D12 opcional.
+
+Validação final:
+
+- o log registrou `[rt64] backend grafico nativo ativo`;
+- o processo permaneceu responsivo, sem display lists rejeitadas;
+- abertura, corredor, personagem e caixa de diálogo foram exibidos em PT-BR;
+- o usuário avaliou o resultado como **“funcionando perfeito”** e confirmou a
+  qualidade visual esperada;
+- o áudio ouvido foi o pipeline local já corrigido, não o áudio
+  dessincronizado da referência externa.
+
+A análise detalhada está em `analise/projeto/integracao_rt64.md`. O que restava
+nesse ponto era percorrer cenas tardias, adaptar F5 à saída GPU e expor
+resolução/upscale como opções. A seção seguinte registra a conclusão do F5; o
+backend CPU segue disponível para A/B e fallback.
+
+---
+
+# 24. RT64 padrão, F5 da saída GPU e avanço momentâneo
+
+RT64 passou a ser o backend padrão tanto no loader quanto no `TESTAR.bat`.
+Nenhum argumento é necessário; `TESTAR.bat cpu` força o rasterizador antigo e
+a falha de carga da ponte continua acionando o fallback automaticamente.
+
+O caminho RT64 retornava de `video_present` antes de atualizar os metadados do
+último VI, portanto F5 não tinha sequer um ponto válido para capturar. Agora a
+rota registra RDRAM, origem, dimensões e formato antes de apresentar. Como os
+pixels finais estão no swapchain Vulkan e não em `g_pixels`, F5 captura a área
+cliente já composta pelo DWM, sem bordas/título, em 640×480. A captura validada
+registrou:
+
+```text
+captura_visual=rt64_dwm 640x480
+video=320x237 formato=2
+```
+
+O BMP continha a imagem RT64 correta da abertura; os arquivos auxiliares de
+estado, RDRAM textual e AList continuam sendo produzidos como antes.
+
+F11 deixou de alternar vozes de diagnóstico. Enquanto pressionado, ele muda o
+retrace emulado para quatro vezes a taxa normal e retira a fila WinMM do
+caminho crítico. Ao entrar, a fila de áudio antigo é descartada; ao soltar, o
+próximo DMA volta a tocar no ponto corrente. O prazo QPC é reiniciado nas duas
+transições para não suspender fibers no prazo da escala anterior.
+
+Medição automática em uma execução RT64 real:
+
+```text
+normal, 2 s:       120 retraces
+F11, 2 s:          446 retraces
+após soltar, 2 s:  retorno à cadência normal
+razão observada:   3,72x (alvo nominal 4x, limitado pela carga real)
+```
+
+O projeto `Vmarcelo49/wpj2-recomp` não forneceu save-state nem checkpoint. Seu
+README lista save-states entre os recursos ainda inexistentes; ele possui
+somente Controller Pak/Memory Pak, descrito pelo próprio projeto como não
+testado. Nosso F2/F4 por reinício e replay determinístico permanece sendo uma
+implementação própria e mais segura que restaurar apenas a RDRAM sobre fibers
+antigas.
+
+---
+
+# 25. F11 em 8× e janela RT64 redimensionável
+
+O multiplicador nominal do avanço momentâneo foi elevado de 4× para 8×.
+Áudio continua fora do caminho crítico enquanto F11 permanece pressionado e
+volta à cadência corrente assim que a tecla é solta. Em execução RT64 real:
+
+```text
+normal, 2 s:  120 retraces
+F11, 2 s:     881 retraces
+razão:        7,34x (alvo nominal 8x, limitado pela carga real)
+```
+
+A janela deixou de ter estilo fixo e agora pode ser redimensionada ou
+maximizada. Durante o arraste, `WM_SIZING` conserva a área cliente em 4:3 e
+`WM_GETMINMAXINFO` impõe mínimo de 320×240. O teste tentou impor 1000×500 e o
+runtime corrigiu para cliente 984×738, razão 4:3. F5 também foi revalidado após
+o redimensionamento:
+
+```text
+captura_visual=rt64_dwm 800x600
+```
+
+A pendência das junções da grade da logo ENIX foi encerrada: o backend RT64
+não reproduz as costuras que existiam no rasterizador CPU. O histórico do
+diagnóstico permanece nas análises; o item saiu de `PENDENCIAS.md`.
+
+Na revisão conjunta seguinte, o usuário também confirmou como resolvida pelo
+RT64 a pendência de fidelidade de materiais e amostragem do corredor 3D. O
+diagnóstico permanece em `analise/projeto/renderizacao_3d_fast3d.md`, mas o
+item deixou a lista de trabalho ativo.
+
+O usuário confirmou ainda que o RT64 corrigiu a entrada vertical e a
+persistência do personagem central do corredor durante os diálogos. Essa
+pendência também foi encerrada; suas sondas antigas continuam preservadas
+somente como histórico de diagnóstico do rasterizador CPU.
+
+A integração do backend de GPU RT64 também foi aprovada como encerrada. RT64
+é o caminho padrão, o CPU permanece como fallback/A-B e F5 acompanha a saída
+GPU. Resolução interna, upscale e filtros configuráveis ficam para uma fase
+posterior de melhorias de PC e não mantêm esta implementação em aberto.
+
+A revisão das pendências manteve aberto o item de legendas PT-BR maiores que
+os recursos ingleses. A arena dinâmica já resolve a capacidade de memória,
+mas textos longos reais ainda apresentam casos de paginação, posicionamento
+ou scroll que precisam de validação interativa.
+
+`Day` e `Progress` no menu de diários também foram confirmados como ainda
+pendentes. Encerrada a revisão conjunta, `PENDENCIAS.md` ficou reduzido a dois
+itens ativos: textos PT-BR longos e esses dois rótulos gráficos do menu.
+
+---
+
+# 26. README recalibrado após a integração RT64
+
+O README foi refeito para descrever o runtime atual, e não mais o estágio do
+rasterizador CPU. As quatro fases agora são estimativas ponderadas e pontuadas:
+
+```text
+Fase 1 — protótipo funcional:     99%
+Fase 2 — fidelidade de execução:  85%
+Fase 3 — extração total:          15%
+Fase 4 — modernização para PC:    45%
+```
+
+Cada fase lista entregas e critérios explícitos para chegar a 100%. Foram
+documentados RT64 padrão/fallback CPU, áudio nativo, controles completos,
+Controller Pak, PT-BR, bookmarks, janela 4:3 e F11 em 8×. Referências novas
+incluem RT64, RecompFrontend, o1heap, `wpj2-recomp`, `wonder`, `josette`, a
+tradução inglesa, libreultra e sdk-tools.
+
+As três imagens antigas foram substituídas por capturas F5 da execução RT64
+atual: ENIX, título e corredor 3D com diálogo PT-BR. Os BMPs, dumps e metadados
+usados na seleção foram tratados como temporários e removidos depois da
+consolidação em `docs/`.

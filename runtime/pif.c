@@ -47,6 +47,16 @@ static int g_roteiro_poll_n;
 /* Definicao tentativa: o contador vive mais abaixo, junto do roteiro por
    leitura, mas a gravacao de reproducao precisa dele aqui em cima. */
 static uint64_t g_polls_controle;
+static int8_t g_stick_x = 0, g_stick_y = 0;
+
+static void cancelar_roteiro_por_entrada_ao_vivo(void) {
+    if (g_roteiro_n || g_roteiro_poll_n) {
+        printf("entr : entrada ao vivo; roteiro gravado cancelado\n");
+        fflush(stdout);
+        g_roteiro_n = 0;
+        g_roteiro_poll_n = 0;
+    }
+}
 
 /* Entrada ao vivo tem prioridade sobre roteiro gravado.
  *
@@ -58,12 +68,7 @@ static uint64_t g_polls_controle;
  * Cancelar os roteiros na primeira tecla e o comportamento correto: quem esta
  * ao teclado quer dirigir, nao assistir a uma sequencia gravada. */
 void pif_set_buttons(uint16_t b) {
-    if (g_roteiro_n || g_roteiro_poll_n) {
-        printf("entr : tecla pressionada; roteiro gravado cancelado\n");
-        fflush(stdout);
-        g_roteiro_n = 0;
-        g_roteiro_poll_n = 0;
-    }
+    cancelar_roteiro_por_entrada_ao_vivo();
     /* Prova do elo, nao suposicao. Tres tentativas de conserto falharam sem
      * que ninguem tivesse verificado que os dois lados falam da MESMA
      * variavel. Se o endereco impresso aqui for diferente do impresso em
@@ -98,18 +103,28 @@ void pif_set_buttons(uint16_t b) {
  * escorregam conforme a carga do host - foi o motivo de g_roteiro_poll existir
  * - enquanto a n-esima leitura e sempre a n-esima leitura. */
 #define GRAVACAO_MAX 4096
-static struct { uint64_t poll; uint16_t botoes; } g_gravacao[GRAVACAO_MAX];
+static struct {
+    uint64_t poll;
+    uint16_t botoes;
+    int8_t stick_x, stick_y;
+} g_gravacao[GRAVACAO_MAX];
 static unsigned g_gravacao_n = 0;
 
 void pif_gravar_transicao(uint16_t b) {
     static uint16_t ultimo = 0;
+    static int8_t ultimo_x = 0, ultimo_y = 0;
     static int primeira = 1;
-    if (!primeira && b == ultimo) return;
+    if (!primeira && b == ultimo && g_stick_x == ultimo_x &&
+        g_stick_y == ultimo_y) return;
     primeira = 0;
     ultimo = b;
+    ultimo_x = g_stick_x;
+    ultimo_y = g_stick_y;
     if (g_gravacao_n < GRAVACAO_MAX) {
         g_gravacao[g_gravacao_n].poll = g_polls_controle;
         g_gravacao[g_gravacao_n].botoes = b;
+        g_gravacao[g_gravacao_n].stick_x = g_stick_x;
+        g_gravacao[g_gravacao_n].stick_y = g_stick_y;
         g_gravacao_n++;
     }
 }
@@ -124,8 +139,10 @@ int pif_gravar_replay(const char* caminho) {
     fprintf(f, "alvo=%llu\n", (unsigned long long)g_polls_controle);
     fprintf(f, "roteiro=");
     for (unsigned i = 0; i < g_gravacao_n; i++)
-        fprintf(f, "%s%llu:%04X", i ? ";" : "",
-                (unsigned long long)g_gravacao[i].poll, g_gravacao[i].botoes);
+        fprintf(f, "%s%llu:%04X@%d,%d", i ? ";" : "",
+                (unsigned long long)g_gravacao[i].poll,
+                g_gravacao[i].botoes, (int)g_gravacao[i].stick_x,
+                (int)g_gravacao[i].stick_y);
     fprintf(f, "\n");
     fclose(f);
     printf("[replay] gravado %s: %u transicao(oes), alvo %llu leituras\n",
@@ -139,7 +156,6 @@ uint64_t pif_polls_atuais(void) { return g_polls_controle; }
 /* WPJ2_STICK aceita "x,y" (por exemplo "80,0"). O analogico antes ficava
  * sempre centrado, deixando sem teste uma entrada que o jogo pode usar para
  * navegar depois da tela inicial. */
-static int8_t g_stick_x = 0, g_stick_y = 0;
 void pif_set_stick(const char* value) {
     long x = 0, y = 0;
     char* end = NULL;
@@ -160,7 +176,7 @@ void pif_set_stick(const char* value) {
  * Segurar um botao nao e o mesmo que aperta-lo: a maioria dos jogos reage a
  * transicao, nao ao estado. Com um roteiro da para testar "aperta no segundo 3,
  * solta em 3,2" sem ninguem no teclado, e varios roteiros em paralelo. */
-#define ROTEIRO_MAX 32
+#define ROTEIRO_MAX 4096
 static struct { uint32_t ms; uint16_t botoes; } g_roteiro[ROTEIRO_MAX];
 static int g_roteiro_n = 0;
 static DWORD g_t0 = 0;
@@ -168,7 +184,12 @@ static DWORD g_t0 = 0;
 /* Roteiro deterministico, contado nas leituras CMD_READ_BTN que o proprio jogo
  * faz. O roteiro em milissegundos e util para uma pessoa, mas sob dezenas de
  * processos em paralelo o escalonador do host desloca uma janela de 50 ms. */
-static struct { uint32_t poll; uint16_t botoes; } g_roteiro_poll[ROTEIRO_MAX];
+static struct {
+    uint32_t poll;
+    uint16_t botoes;
+    int8_t stick_x, stick_y;
+    uint8_t tem_stick;
+} g_roteiro_poll[ROTEIRO_MAX];
 static int g_roteiro_poll_n = 0;
 static uint64_t g_polls_controle = 0;
 static uint32_t g_polls_controle_logados = 0;
@@ -199,10 +220,26 @@ void pif_set_poll_script(const char* s) {
         unsigned long b = strtoul(fim + 1, &fim, 16);
         g_roteiro_poll[g_roteiro_poll_n].poll = (uint32_t)poll;
         g_roteiro_poll[g_roteiro_poll_n].botoes = (uint16_t)b;
+        g_roteiro_poll[g_roteiro_poll_n].stick_x = 0;
+        g_roteiro_poll[g_roteiro_poll_n].stick_y = 0;
+        g_roteiro_poll[g_roteiro_poll_n].tem_stick = 0;
+        if (fim && *fim == '@') {
+            long x = strtol(fim + 1, &fim, 10);
+            long y = 0;
+            if (fim && *fim == ',') y = strtol(fim + 1, &fim, 10);
+            if (x < -128) x = -128;
+            if (x > 127) x = 127;
+            if (y < -128) y = -128;
+            if (y > 127) y = 127;
+            g_roteiro_poll[g_roteiro_poll_n].stick_x = (int8_t)x;
+            g_roteiro_poll[g_roteiro_poll_n].stick_y = (int8_t)y;
+            g_roteiro_poll[g_roteiro_poll_n].tem_stick = 1;
+        }
         g_roteiro_poll_n++;
         if (!fim || *fim != ';') break;
         s = fim + 1;
     }
+    g_t0 = GetTickCount();
     printf("entr : roteiro por leitura com %d passo(s)\n", g_roteiro_poll_n);
 }
 
@@ -210,8 +247,14 @@ void pif_set_poll_script(const char* s) {
 static uint16_t botoes_agora(void) {
     if (g_roteiro_poll_n) {
         uint16_t b = 0;
-        for (int i = 0; i < g_roteiro_poll_n; i++)
-            if (g_roteiro_poll[i].poll <= g_polls_controle) b = g_roteiro_poll[i].botoes;
+        for (int i = 0; i < g_roteiro_poll_n; i++) {
+            if (g_roteiro_poll[i].poll > g_polls_controle) continue;
+            b = g_roteiro_poll[i].botoes;
+            if (g_roteiro_poll[i].tem_stick) {
+                g_stick_x = g_roteiro_poll[i].stick_x;
+                g_stick_y = g_roteiro_poll[i].stick_y;
+            }
+        }
         return b;
     }
     if (g_roteiro_n == 0) {
@@ -303,6 +346,7 @@ static void copy_bswap(uint8_t* dst, const uint8_t* src, size_t bytes) {
 #define NO_DEVICE       0x80   /* bit posto no tamanho de resposta */
 
 void pif_update_stick_from_keys(int up, int down, int left, int right) {
+    cancelar_roteiro_por_entrada_ao_vivo();
     int8_t sx = 0, sy = 0;
     if (up)    sy += 80;
     if (down)  sy -= 80;
@@ -379,18 +423,24 @@ static void pif_process(int refresh) {
                  * pessoa apertava uma tecla no titulo, minutos depois - que e
                  * justamente o instante que interessa. */
                 static uint16_t ultimo = 0;
+                static int8_t ultimo_x = 0, ultimo_y = 0;
                 static int primeira = 1;
-                if (b != ultimo || primeira) {
+                if (b != ultimo || g_stick_x != ultimo_x ||
+                    g_stick_y != ultimo_y || primeira) {
                     primeira = 0;
-                    printf("[pif] MUDOU botoes=%04X na leitura %llu\n",
-                           b, (unsigned long long)g_polls_controle);
+                    printf("[pif] MUDOU botoes=%04X stick=%d,%d na leitura %llu\n",
+                           b, (int)g_stick_x, (int)g_stick_y,
+                           (unsigned long long)g_polls_controle);
                     fflush(stdout);
                     ultimo = b;
+                    ultimo_x = g_stick_x;
+                    ultimo_y = g_stick_y;
                 }
                 if (g_polls_controle_logados++ < 32) {
-                    printf("[pif] leitura=%llu tempo=%lu ms botoes=%04X\n",
+                    printf("[pif] leitura=%llu tempo=%lu ms botoes=%04X stick=%d,%d\n",
                            (unsigned long long)g_polls_controle,
-                           (unsigned long)(GetTickCount() - g_t0), b);
+                           (unsigned long)(GetTickCount() - g_t0), b,
+                           (int)g_stick_x, (int)g_stick_y);
                     fflush(stdout);
                 }
                 out[0] = (uint8_t)(b >> 8);

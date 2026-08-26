@@ -34,6 +34,7 @@ src/gerado/
 
 # Conteudo extraido do jogo
 textos/
+assets/generated/
 objetos_ci8.bin
 tlut.bin
 cena
@@ -74,6 +75,7 @@ tools/josette/
 tools/libreultra/
 tools/sdk-tools/
 tools/wonder-source/
+tools/wpj2-recomp/
 
 # ---------------------------------------------------------------------------
 # Artefatos de build e de sondagem / Build and probe artifacts

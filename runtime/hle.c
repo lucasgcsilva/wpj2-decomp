@@ -1018,8 +1018,6 @@ void func_800D5060(uint8_t* rdram, recomp_context* ctx) {
    custa o mesmo que testar uma taxa so. */
 static double g_retrace_hz = 60.0;
 static double g_retrace_normal_hz = 60.0;
-/* F10 continua visivel como controle, mas nao altera a emulacao ate existir
- * um scheduler que suporte salvar/restaurar suas fibers. */
 static int g_fast_forward = 0;
 /* O prazo e double em ticks QPC para conservar a fracao de 1/60. Um contador
  * inteiro arredondado cria uma deriva pequena, porem mensuravel em cutscenes
@@ -1035,14 +1033,29 @@ void hle_set_retrace(double hz) {
 }
 
 int hle_toggle_fast_forward(void) {
-    /* Confirmado pelo teste manual: elevar o retrace suspende uma fiber e a
-     * segunda tecla a devolve exatamente ao mesmo ponto; nao houve avancar
-     * oculto. Portanto nao fingimos fast-forward. */
-    g_fast_forward = 0;
-    return 0;
+    hle_set_fast_forward(!g_fast_forward);
+    return g_fast_forward;
 }
 
 int hle_fast_forward_active(void) { return g_fast_forward; }
+
+void hle_set_fast_forward(int enabled) {
+    enabled = enabled != 0;
+    if (enabled == g_fast_forward) return;
+    g_fast_forward = enabled;
+    g_retrace_hz = g_retrace_normal_hz * (enabled ? 8.0 : 1.0);
+    if (g_retrace_hz > 1000.0) g_retrace_hz = 1000.0;
+
+    /* Trocar de escala no meio de um periodo antigo podia deixar a fiber
+       esperando pelo prazo anterior. Recomecar o prazo a partir do QPC atual
+       torna pressionar/soltar uma operacao monotona e imediata. */
+    if (g_poll_freq.QuadPart) {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        g_poll_deadline = (double)now.QuadPart +
+            (double)g_poll_freq.QuadPart * (1.0 / g_retrace_hz);
+    }
+}
 #define RETRACE_PERIOD_S      (1.0 / g_retrace_hz)
 #define POLL_BUDGET           4096
 
@@ -2024,6 +2037,12 @@ void recomp_poll(void) {
        Telas pretas, sondas de cadência e threads longas ainda precisam
        processar WM_PAINT/WM_CLOSE para permanecer responsivas. */
     video_pump_messages();
+    if (video_bookmark_restart_requested()) {
+        audio_shutdown();
+        video_shutdown();
+        hle_clock_shutdown();
+        ExitProcess(42);
+    }
     /* No modo sem timeout, fechar a janela e o encerramento normal. Fazemos a
      * limpeza aqui, em ponto cooperativo, para o cabeçalho WAV ser finalizado
      * antes de terminar o processo. */
