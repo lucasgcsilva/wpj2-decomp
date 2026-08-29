@@ -1,5 +1,34 @@
 # Retomada — estado em 23/08/2026
 
+## 29/08/2026 — desempenho do corredor e reversão segura
+
+- O slot 1 isolou o engasgo também sem saída de áudio; o som não é a causa.
+- `RT64::processDisplayLists` custa vários milissegundos por tarefa e ainda
+  ocupa o caminho cooperativo principal.
+- A tentativa inicial de fila gráfica assíncrona congelou o jogo após duas
+  tarefas porque o contrato SP/DP não foi reproduzido por completo.
+- A tentativa foi retirada. O RT64 voltou ao processamento síncrono validado:
+  590 tarefas gráficas, 345 de áudio e 689 apresentações a 60,05 Hz numa rodada
+  pelo slot 1, sem congelamento.
+- O slot 1 do usuário e o slot 9 reservado para testes não foram sobrescritos.
+- Próximo passo de desempenho: portar a fila gráfica completa do
+  N64ModernRuntime, incluindo a ordem real de SP/DP e o despertar do
+  gerenciador, em vez de apenas tornar a chamada RT64 assíncrona.
+
+### Continuação — Vulkan como backend padrão
+
+- A causa dominante dos picos era a API D3D12 escolhida por `Automatic` no
+  Windows: listas de somente 984 bytes bloqueavam 60–100 ms.
+- No mesmo slot 1, Vulkan reduziu as tarefas `>=33 ms` de 61 para 10 e colocou
+  999/1.074 tarefas abaixo de 2 ms, mantendo a mesma renderização RT64 2x.
+- Vulkan agora é o padrão; `WPJ2_RT64_API=d3d12` conserva o comparativo.
+- A preparação dos pipelines foi movida para a inicialização e a primeira
+  display list resincroniza o relógio para não transformar aquecimento do host
+  em VIs atrasados.
+- Validação final com áudio: 699 tarefas gráficas, 438 de áudio, 876
+  apresentações a 60,05 Hz, sem trava; apenas quatro tarefas gráficas acima de
+  33 ms.
+
 Documento de handoff. A sessão de chat que produziu isto foi descartada de
 propósito; **tudo o que importa está aqui e nos arquivos citados.** Comece por
 este arquivo, não por histórico de conversa.
@@ -1334,12 +1363,12 @@ aspas e espaços nas bordas. Foram encontradas 98 chaves ausentes e todas foram
 adicionadas ao mapa ativo; o veredito atual é 5.886 chaves e zero lacunas nesse
 banco. Falsos positivos fora dele continuam fora do catálogo.
 
-Nas falas longas, a arena já continha português correto. A sobreposição da tela
-era uma dupla quebra: a linha portuguesa ultrapassava a largura em pixels,
-quebrava automaticamente e logo encontrava a quebra fixa do inglês. A rota
-composta posterior a `vsprintf` agora remove as quebras puramente tipográficas
-e refaz linhas de até 38 glifos, mantendo os pares de controle `E0/E1/E2`.
-`test_legendas_recursos.exe` valida conteúdo, controles e limite de linha.
+Nas falas longas, a arena já continha português correto. A hipótese desta
+rodada foi uma dupla quebra e a implementação chegou a remover delimitadores
+tipográficos e recalcular linhas. **Esse resultado foi rejeitado depois em
+execução real**: causava sobreposição e deslocava controles. A seção 32 contém
+a substituição segura, que preserva toda quebra explícita e só troca um espaço
+por `\n` quando a quebra automática cairia dentro de uma palavra.
 
 ---
 
@@ -1549,3 +1578,569 @@ As três imagens antigas foram substituídas por capturas F5 da execução RT64
 atual: ENIX, título e corredor 3D com diálogo PT-BR. Os BMPs, dumps e metadados
 usados na seleção foram tratados como temporários e removidos depois da
 consolidação em `docs/`.
+
+---
+
+# 27. Primeira rodada de correção sistemática das falas restantes
+
+Cinco capturas F5 foram correlacionadas com o catálogo, o banco vivo, a fila
+de mensagens e o buffer apresentado. Três causas reais foram separadas:
+
+- falas com `ã` eram adiadas antes do formatador e não podiam mais ser
+  reconhecidas depois que variáveis como `Josette` eram expandidas;
+- o comando animado `E2 06 80 10` era lido como se tivesse somente dois bytes
+  e fazia o parser rejeitar a mensagem;
+- `Doctor...` permanecia inglês no próprio catálogo ativo.
+
+O runtime agora codifica `ã` como `0x7F` somente durante a fase anterior a
+`func_8008EDA4` e o restaura como glifo `0x25` em `func_80090E58`. Isso permite
+traduzir a mensagem inteira cedo, preservando variáveis e sem expor `%` ao
+formatador. A forma PT-BR já codificada também é reconhecida e protegida em
+reentradas do mesmo bloco. Runtime e extrator preservam controles E2 de quatro bytes;
+`Don't be so sel...fish.` foi catalogado como `Não seja tão ego...ísta.` e
+`Doctor...` como `Doutor...`.
+
+O suposto reaproveitamento indevido no quinto F5 não apareceu nos dados: a
+fila aponta para uma arena distinta com a tradução correta, enquanto o buffer
+visual ainda contém a frase anterior e o estado é `0x2D`. Ele fica para
+revalidação interativa, sem correção paliativa.
+
+`test_legendas_recursos.exe` passou incluindo a colisão de fase e o controle
+animado. `tools/build_probe.cmd rt64` recompilou com sucesso o executável usado
+por `TESTAR.bat`.
+
+---
+
+# 28. F11 com frame skip e diagnóstico da falsa repetição
+
+O novo F5 mostrou `Ali, uma pessoa...` na janela, mas a fila de diálogo já
+continha `Eh? Mas por que!?` em outro slot. A execução tinha 33.727 retraces e
+somente 7.295 tarefas gráficas: a simulação acelerada estava muito à frente da
+apresentação RT64. Não houve repetição de chave nem de tradução.
+
+F11 agora mantém toda a lógica do jogo, inclusive filas, textos e transições,
+mas descarta a rasterização de sete em cada oito tarefas gráficas e suspende a
+apresentação da janela enquanto está pressionado. Isso remove RT64 do caminho
+crítico do 8x e evita mostrar uma fala obsoleta como se fosse a atual. Ao
+soltar, a apresentação recomeça na próxima tarefa completa. A leitura física
+de F11 corrige também a perda de `WM_KEYUP` observável durante reconstruções
+da swapchain na transição 3D/2D. O relatório final passa a informar quantos
+quadros foram descartados pelo turbo.
+
+---
+
+# 29. Replay F4 em 8x e causa real da repetição de falas
+
+O replay acionado por F4 agora compartilha o turbo de navegação do F11. Durante
+a reconstrução até o poll gravado pelo F2, o runtime descarta sete de cada oito
+tarefas gráficas, não apresenta RT64 e não envia áudio ao host. A lógica,
+transições e entradas continuam integrais. Um replay existente alcançou
+exatamente a leitura 4.995 e retornou automaticamente à velocidade normal.
+
+A repetição de `Ali, uma pessoa...` não vinha do catálogo. A tradução seguinte
+`Eh? Mas por que!?` existia corretamente em `0x80410028`, porém
+`SysMem_DmaCopy` recusava origens acima de 4 MB e não a copiava ao buffer vivo.
+A fila seguia adiante enquanto a imagem mantinha a frase anterior. O wrapper de
+`func_800BD218` passou a copiar logicamente a faixa reservada da arena PT-BR;
+todo o restante continua na implementação original do jogo.
+
+---
+
+# 30. F4 máximo, controles E0 multilinha e fala animada ausente
+
+O retorno F4 agora omite 100% da rasterização até alcançar a leitura de
+controle gravada pelo F2. A simulação guest permanece completa; F11 continua
+em 8x com uma lista gráfica a cada oito. Um bookmark existente atingiu
+exatamente a leitura 7.995 e restaurou a cadência normal. A troca de processo
+continua intencional: pilhas de fibers, continuações C e RT64 não formam um
+estado que possa ser reinicializado com segurança dentro da mesma janela.
+
+Os textos `não se preocuJosettepe` e `por mJosetteim` foram explicados pelo
+controle `E0 01`, que insere o nome da protagonista. Ele pertence à coluna zero
+da segunda linha, mas era reposicionado pela proporção do tamanho total. O
+mapeamento agora conserva linha e coluna; o teste unitário exige `\n E0 01`.
+
+`Dr. Geppetto: Live your life to the fullest.` não constava do catálogo por
+estar numa região dinâmica e conter três controles animados `E2 06`. Foi
+adicionada como `Dr. Geppetto: Viva sua vida plenamente.`, mantendo os
+controles. A primeira passada conservadora de gênero corrigiu formas
+inequivocamente dirigidas à Josette nos catálogos, sem alterar automaticamente
+falas cujo interlocutor é ambíguo.
+
+Validação: `test_legendas_recursos.exe` passou; `tools/build_probe.cmd rt64`
+recompilou o runtime; replay headless alcançou o alvo 7.995 dentro da janela de
+seis segundos.
+
+---
+
+# 31. Refluxo seguro de diálogos e cerco de `Day`/`Progress`
+
+O buffer do F5 continha `Tenho certeza que você será gentilmente vigiada...`
+sem quebra; `vig`/`iada` era produzido pelo limite automático do formatador.
+O runtime agora aplica word-wrap apenas ao banco narrativo confirmado, volta
+ao último espaço quando a linha excede 38 glifos e preserva todas as quebras
+explícitas. Menus e outros tipos de caixa permanecem fora desse tratamento.
+
+Para `Day` e `Progress`, a referência em `wonder-source` reenquadrou o caso:
+`func_80094230` compõe glifos/objetos no atlas CI8. `TESTAR.bat` ativa um ring
+diagnóstico e cada F5 grava `glifos_f5_NNN.tsv` com sequência, objeto,
+coordenadas, avanço, estado e chamador. Isso permitirá localizar e substituir
+o recurso nativo das palavras, sem repetir a tentativa rejeitada de pintar no
+framebuffer.
+
+---
+
+# 32. Correção do refluxo e origem gráfica de `Day`/`Progress`
+
+A validação interativa rejeitou o refluxo descrito na seção anterior. Ele
+removia quebras existentes e recalculava a mensagem inteira; isso produziu
+texto sobreposto e deslocou o controle `E0 01`, fazendo `Josette` aparecer no
+meio de palavras. A implementação foi substituída por uma operação que mantém
+o comprimento: com `\n`/`\r` explícito não toca em nada; sem quebra explícita,
+troca apenas o espaço anterior ao ponto em que o limite nativo de 38 glifos
+cortaria uma palavra. Os testes verificam preservação byte a byte da quebra
+original e o ajuste isolado da quebra automática.
+
+Para os rótulos do diário, um ring de 524.288 posições preservou os 144.184
+objetos desde o início do replay e ainda não encontrou `Day` nem `Progress`.
+Logo eles não passam pelo compositor normal. `Spi_DecompressAsset` revelou o
+recurso exclusivo do patch inglês em ROM `0x0068E100`, com 0x282E0 bytes
+descomprimidos; a ROM japonesa usa outro banco e não carrega esse endereço.
+Essa é agora a origem concreta a dissecar, substituindo o recurso antes da
+rasterização e não desenhando texto sobre o framebuffer.
+
+Validação local: `test_legendas_recursos.exe` passou e
+`tools/build_probe.cmd rt64` gerou `wpj2_probe.exe` com a ponte RT64 ativa.
+
+---
+
+# 33. Quebra proporcional confirmada pelos quatro F5
+
+Os F5 `001..004` provaram que a sobreposição restante era uma dupla rolagem,
+não texto ausente. A sequência de objetos mostra, por exemplo, `Bird` chegando
+a x=228; a vírgula cai sozinha em y=14 e o `\n` do recurso imediatamente
+reinicia a linha seguinte em y=0. O mesmo padrão ocorreu em `então`, em espaços
+de preenchimento depois de `hora de` e depois de `determinada`.
+
+O limite anterior de 38 caracteres foi descartado. A fonte é proporcional e
+os avanços medidos em `func_80094230` variam de 2 a 8 pixels; o corte nativo
+fica em aproximadamente 232 px. O compositor PT-BR agora calcula pixels. Em
+mensagens compostas, espaços imediatamente anteriores a `\n` são removidos e,
+se necessário, a própria quebra explícita é reposicionada para o espaço antes
+da palavra que estouraria. A posição antiga vira espaço: conserva-se uma única
+quebra, em vez de somar uma quebra nossa à automática do jogo.
+
+`test_legendas_recursos.exe` passou, incluindo a divisão real antes de `Bird`,
+e `tools/build_probe.cmd rt64` recompilou `wpj2_probe.exe`.
+
+---
+
+# 34. Linha terminal preservada e diagnóstico da trava completa da loja
+
+O F5 da instrução de três linhas mostrou que a terceira não pertencia ao
+recurso: `botão!` era desenhado novamente em `y=0` porque o refluxo havia
+movido o `0A` terminal para dentro da fala. Esse delimitador encerra a exibição
+e não pode ser usado como uma quebra de layout. O runtime agora o preserva e
+condensa a tradução nas duas linhas nativas. Os fragmentos mistos também foram
+corrigidos, removendo `it` e `press`. O teste cobre a mensagem completa e seus
+controles animados.
+
+O travamento posterior na loja foi classificado como congelamento completo:
+imagem e áudio param juntos. O log disponível foi obtido antes da ocorrência
+e continuava avançando normalmente, portanto não sustenta uma correção por
+palpite. `TESTAR.bat` agora ativa `WPJ2_STALL_WATCHDOG`; se retraces, tarefas
+de áudio e polls ficarem simultaneamente imóveis por dez segundos, o runtime
+grava automaticamente estado, trilha, RDRAM e glifos em
+`temp/projeto/padrao`, sem exigir F5. Essa captura será a base da correção geral
+da loja e dos seus textos ainda em inglês.
+
+Validação: `test_legendas_recursos.exe` passou e `tools/build_probe.cmd rt64`
+gerou novamente `wpj2_probe.exe` com RT64.
+
+---
+
+# 35. Fala do botão, recursos da loja e causa concreta do congelamento
+
+O `f5_001` mostrou que a instrução de carregar objetos continuava sendo
+composta pelos fragmentos ingleses `yellow ` e ` button!`, separados pelos
+controles coloridos E1. Traduzir o fragmento inicial como `Botão Amarelo`
+mudava o papel dos controles e provocava a sobreposição. A composição agora é
+`amarelo [controle] botão!`, preservando a ordem e a paginação nativas.
+
+O `f5_002` confirmou uma segunda rota de texto na loja. Nomes de itens já
+passavam pelo catálogo, mas `Buy`, `Back`, a ajuda e as descrições permaneciam
+em pequenas cadeias NUL de tabelas carregadas por SPI/PI. Foi acrescentada uma
+substituição por bloco que só aceita chaves exatas do catálogo e grava dentro
+do slot original e de sua folga NUL. Não existe camada desenhada sobre o
+framebuffer. O catálogo cobre os rótulos da loja e as descrições dos dois
+óleos; o teste unitário comprova dois slots consecutivos.
+
+O watchdog automático capturou a trava completa. Não era apenas uma impressão
+de acúmulo: depois de 94.105 retraces, imagem, áudio e CPU pararam juntos. A
+trilha terminou em `__osSpDeviceBusy`, embora a fila RSP estivesse vazia, sem
+conclusões perdidas e sem DMA pendente. Como a ponte executa as DMAs de SP de
+modo síncrono, o estado ocupado vinha do espelho MMIO obsoleto. `__osSpSetPc`
+e `__osSpDeviceBusy` agora usam o estado nativo do RSP e foram incluídas nas
+substituições do recompilado.
+
+Validação local: build RT64 concluído; `test_legendas_recursos.exe` passou com
+a fala controlada e os slots estáticos da loja. Falta validar interativamente
+a sequência longa de compras/navegação para confirmar que não há uma segunda
+causa de congelamento.
+
+---
+
+# 36. Stress reproduzível e log automático de inglês sem catálogo
+
+Foi criado o perfil `TESTAR.bat stress N`. Ele reproduz o bookmark F2 em turbo
+até o poll exato e, depois de uma margem de 120 leituras, alterna A/B,
+direcionais, C-Buttons, Z, L/R e analógico. A lógica, o áudio e as tarefas RSP
+continuam ativos; somente janela e saída sonora são omitidas. O watchdog de
+congelamento permanece ligado.
+
+Três rodadas totalizaram 345 segundos. A principal chegou à loja e recarregou
+seus itens continuamente: 85.361 retraces, 77.832 tarefas RSP, 38.107 chamadas
+do heap, fila RSP com pico 1/256 e zero descarte. As três encerraram pelo tempo
+configurado, sem watchdog, exceção ou falha antecipada. Isso aumenta a
+confiança na correção de `__osSpDeviceBusy`, mas não equivale a jogar até os
+créditos, pois a entrada sintética não garante avanço narrativo.
+
+Toda execução de `TESTAR.bat` também cria `traducao_ausentes.tsv`. A sonda
+fica na entrada do formatador, registra apenas frases consumidas, remove
+controles, evita sufixos por glifo, deduplica e filtra português dinâmico já
+traduzido. A última calibração não encontrou inglês sem chave nas cenas
+percorridas. Texto incorporado a imagem continua fora dessa sonda e deve ser
+mapeado como asset.
+
+Validação: `test_legendas_recursos.exe` OK, build RT64 OK e `git diff --check`
+sem erros de conteúdo.
+
+---
+
+# 37. Stress acelerado a 480 Hz
+
+O perfil de stress passou a aceitar uma seed no terceiro argumento e usa
+480 Hz depois de reconstruir o bookmark: `TESTAR.bat stress 240 7`. A rodada
+alcançou aproximadamente 180 leituras de controle por segundo e terminou pelo
+limite de 240 segundos, sem watchdog ou exceção.
+
+Carga acumulada: 176.737 retraces, 160.787 tarefas RSP, 321.576 transferências
+de SP, 33.730 DMAs de cartucho, 112.583 chamadas do heap, 3.813.463 LOADBLOCKs
+e cerca de 6,49 GB enviados à TMEM. A fila RSP atingiu apenas 1/256, com zero
+descarte, e nenhuma DMA PI foi recusada. O antigo congelamento da loja não se
+reproduziu mesmo sob carga muito superior à execução interativa.
+
+A sonda `traducao_ausentes.tsv` ficou vazia além do cabeçalho. A sequência
+variou recursos e o portão interno, mas permaneceu principalmente no estado
+da loja (`1/1`); stress sintético testa estabilidade, não resolve escolhas de
+gameplay. Para avançar a cobertura, o melhor próximo insumo é um novo bookmark
+gravado manualmente depois da loja.
+
+O texto histórico do encerramento por timeout dizia que o boot estava preso
+esperando hardware, mesmo em testes deliberadamente temporizados. A mensagem
+agora é neutra: `tempo limite configurado atingido`.
+
+---
+
+# 38. Stress dirigido da loja, validação texto→saída e coordenadas de Bird
+
+Foi criado `TESTAR.bat stress_loja N`. Diferente do stress aleatório, ele usa
+as próprias frases consumidas pelo formatador como marcos: reconhece o fim do
+tutorial e a menção à Loja de Computadores antes de emitir entradas. As
+tentativas provaram que o bookmark atual termina ainda no tutorial, e não no
+computador. Também expuseram duas reproduções intermitentes que congelaram em
+`11/24`, tela preta e polls parados em ~18,6 mil, enquanto áudio/retraces
+continuaram. Portanto a estabilidade do replay F4 ainda não está encerrada.
+
+O formatador agora gera `traducao_validacao.tsv`, comparando o snapshot que
+identificou com o ponteiro final realmente consumido. Na rodada completa houve
+15 pares exatos e uma divergência: a tradução esperada ganhou `\n` antes de
+`apontar!`; trata-se da quebra automática de layout, não de uma frase trocada.
+O log conserva identificado, esperado e consumido para distinguir os casos.
+
+Para eliminar a calibração visual de Bird, F5 passou a gravar no próprio
+`f5_NNN.txt` os três bancos `SpriteObj` apontados por `801A8C18/24/30`, quatro
+slots por banco, incluindo flags, recurso, `x/y/z` e rotação. A próxima ação é
+posicionar Bird sobre o computador e apertar F5; essa coordenada alimentará o
+roteiro dirigido, que então poderá confirmar Comprar e navegar à direita por
+mais de dez segundos sem depender de aproximações.
+
+---
+
+# 39. Bookmark v2 por retrace e requisitos do save state real
+
+Foram estudados `tools/oot-dx` e o `psxrecomp-v4` trazido pelo
+MegaManX4Recomp. O primeiro não possui snapshot arbitrário: oferece avanço de
+quadro, map select, noclip e edição de estado no nível do jogo. O segundo tem
+um serializador completo, versionado e aplicado em block leader seguro, mas
+recusa expressamente o carregamento no modo de host fibers.
+
+Essa restrição coincide com nosso runtime: cada `OSThread` possui
+`recomp_context`, porém sua continuação real vive na pilha C da fiber. Um save
+state verdadeiro exige primeiro um escalonador sem fibers, com `resume_pc` e
+continuações reentrantes; restaurar apenas RDRAM voltaria a criar as travas já
+observadas.
+
+A causa concreta da variação do F4 atual era anterior a essa reforma maior: o
+bookmark v1 associava entradas e alvo à quantidade de leituras do PIF, que
+varia conforme o escalonamento. Novos F2 geram `WPJ2_BOOKMARK_2`, com mudanças
+de controle e alvo vinculados ao retrace emulado. O leitor continua aceitando
+v1. Build completo passou; um smoke test carregou três transições e desligou
+o turbo exatamente no retrace 4. A análise e a sequência completa do futuro
+save state estão em `analise/projeto/checkpoints_estado.md`.
+
+Para validar, grave um novo F2 numa cena distante e use F4 três vezes. O
+`quick.replay` antigo só passa a v2 depois desse novo F2.
+
+---
+
+# 40. Correção do F4 que apenas reiniciava
+
+O log da execução interativa mostrou que o F4 carregava corretamente o
+`quick.replay` v2 e anunciava o alvo 8164, mas chegava a ele antes da primeira
+consulta ao PIF. A aceleração ilimitada do VI mantinha a thread de retrace
+sempre pronta e impedia as threads de menor prioridade de inicializar e
+consumir o roteiro. Assim, o contador era correto e o estado do jogo era o de
+um boot comum.
+
+O retorno por retrace passou a usar 8x cadenciado (480 Hz), incluindo o áudio
+em modo acelerado. O portão temporal continua existindo, de modo que controle,
+lógica e tarefas RSP avançam junto com o retrace. Ao alcançar o alvo, vídeo e
+áudio voltam automaticamente à velocidade normal.
+
+Validação headless com o bookmark real:
+
+- alvo: retrace 8164, 161 transições;
+- as leituras do controle e as transições ocorreram antes do alvo;
+- estado salvo no F2: `1/1`;
+- estado após o retorno e no retrace 8467: `1/1`;
+- build completo de `wpj2_probe.exe` aprovado.
+
+Também foi corrigido o metadado auxiliar `quick.txt`, que agora declara
+`WPJ2_BOOKMARK_2`. Um novo F2 substitui o arquivo antigo automaticamente.
+
+---
+
+# 41. Início do save state real por continuations
+
+O replay foi classificado como solução temporária e não será ampliado. O
+Project64 consegue restaurar instantaneamente porque CPU, PC e periféricos são
+estruturas explícitas; no runtime atual de WPJ2, a continuação de cada thread
+vive numa fiber Win32 não serializável.
+
+Foi escolhida uma pilha portátil de frames `{function_vram, callsite_vram}`.
+Ao ceder, a pilha C é abandonada; no próximo despacho, as funções saltam pelos
+callsites gravados e reconstroem a cadeia. O núcleo inicial está em
+`runtime/continuation.c` e passou um teste de roundtrip com três chamadas
+aninhadas, incluindo uma operação anterior à pausa que não pode ser repetida.
+
+O inventário encontrou 8.274 chamadas diretas, 82 indiretas, 8.353 rótulos
+`after_N` e 10 pausas diretas em 37 fontes gerados. O mapa completo, as seções
+do futuro arquivo e a ordem de integração estão em
+`analise/projeto/savestate_runtime.md`.
+
+Na etapa seguinte, `src/scripts/injetar_continuacoes.py` transformou as 3.651
+funções reais. Todas as 8.356 chamadas foram associadas à instrução MIPS que
+as originou e ganharam push/retomada/propagação/pop. Os 37 arquivos stateful
+compilaram com sucesso no MSVC. Essa variante ainda não é ligada ao executável:
+o próximo corte é fazer polls e pausas retornarem ao primeiro dispatcher sem
+fibers.
+
+---
+
+# 42. Save state real concluído e integrado ao F2/F4
+
+O escalonador por fibers foi substituído no build principal pelo dispatcher
+stateful. As 3.651 funções recompiladas recebem continuations geradas; cada
+frame conserva função, callsite, temporários C e o alvo de chamadas indiretas.
+Polls e preempções abandonam a pilha hospedada e a reconstroem apenas a partir
+dos dados serializáveis da OSThread.
+
+O arquivo `sav/bookmarks/quick.wpstate` (formato interno v4) grava 8 MiB de
+RDRAM, até 32 threads/contextos/continuations e os estados lógicos de HLE, RSP,
+PIF e áudio. Há magic, versão, tamanhos, validação de cada thread e hash FNV-1a
+do payload. A carga valida tudo antes de alterar o mundo vivo. Buffers do host
+e o swapchain RT64 não são serializados: áudio e RT64 são encerrados e
+recriados a partir do estado lógico restaurado.
+
+Dois defeitos estruturais apareceram e foram corrigidos durante a integração:
+
+- ao consumir a última frame antiga, a continuação ainda se declarava em
+  reconstrução e confundia a primeira chamada nova com uma frame persistida;
+- alvos `JALR` e temporários `hi/lo/result/c1cs` viviam em variáveis C locais e
+  eram sobrescritos por chamadas profundas; agora fazem parte da frame.
+
+Validação final:
+
+- testes unitários de continuation e thread por arquivo: OK;
+- execução ativa por 10 s: 511 funções e 479.601 chamadas, sem alvo inválido;
+- snapshot de 9.726.968 bytes gravado e restaurado durante a abertura;
+- o arquivo foi carregado em um processo novo e continuou a execução;
+- três comandos F4 consecutivos restauraram no mesmo processo sem trava;
+- vídeo RT64 e áudio continuaram ativos; a ponte RT64 foi recriada após cada
+  carga, sem fechar a janela e sem cair no rasterizador CPU.
+
+`tools/build_probe.cmd` agora gera e liga `RecompiledFuncsStateful` com
+`sched_stateful.c`. O replay antigo permanece somente nos perfis especializados
+de stress. A pendência F2/F4 foi removida de `PENDENCIAS.md`.
+
+---
+
+# 43. Estabilização da abertura e do snapshot — contexto completo v6
+
+A primeira integração do dispatcher stateful ainda tinha uma regressão real:
+às vezes congelava depois das logos e, em outras execuções, durante o corredor
+3D. Foram isoladas e corrigidas três causas estruturais:
+
+- eventos de VI/RSP cediam a CPU mesmo quando só havia threads de prioridade
+  inferior prontas. Agora a preempção assíncrona respeita a prioridade da
+  libultra; a abertura voltou de 154 listas gráficas em 180 s para mais de
+  50 listas por segundo;
+- overrides nativos podiam ser interrompidos enquanto mantinham uma pilha C
+  não serializável. A preempção é adiada nessa fronteira e pontos bloqueantes
+  explícitos continuam funcionando;
+- cada continuation guardava o callsite e o SP, mas não os registradores usados
+  para montar os argumentos do `JAL`. O formato v6 agora conserva GPRs, FPRs,
+  HI/LO e estado de FPU em cada frame, restaurando exatamente o contexto do pai
+  antes de reconstruir a chamada.
+
+O microcódigo RSP também passou a limitar e quebrar transferências DMA dentro
+da memória física do RSP, evitando asserts do host sem alterar a semântica de
+wrap do hardware.
+
+Validação final desta revisão:
+
+- abertura automática por 120 s: 6.142 listas gráficas, 3.527 listas de áudio,
+  9.279.159 chamadas e nenhuma exceção/fault/assert;
+- WAV contínuo de 117,9 s: DC -25,8, RMS 5.081, pico 32.161 e zero saturações;
+- F2 aos 38 s no corredor e dois F4 na mesma janela: ambos restauraram `12/50`
+  e a execução continuou até 85 s;
+- `quick.wpstate` v6 com 10.808.312 bytes carregado por um processo novo, que
+  produziu mais 1.727 listas gráficas e 1.036 listas de áudio em 35 s;
+- testes unitários: `continuation snapshot roundtrip: OK` e
+  `stateful thread file restart: OK`.
+
+Snapshots anteriores ao v6 são recusados deliberadamente; um novo F2 os
+substitui de forma atômica.
+# 44. Nove slots de estado e diagnóstico de cadência — 29/08/2026
+
+O snapshot v6 deixou de usar apenas `quick.wpstate`. `Ctrl+Shift+1..9` grava
+`sav/bookmarks/slotN.wpstate` e `Ctrl+1..9` restaura o número correspondente,
+sem fechar a janela. Gravações são atômicas e substituem somente o slot
+escolhido. Dois slots distintos foram gravados e restaurados na mesma execução;
+os testes unitários de continuation/thread também passaram.
+Uma notificação sobreposta ao RT64 confirma por 1,8 segundo `Slot N salvo` ou
+`Slot N carregado`; falhas usam o mesmo aviso em vermelho.
+
+A sensação de desempenho não vinha de um relógio abaixo de 60 Hz: foram
+medidos 1.200 VIs em 20 s. `hle_deliver_events`, porém, devolvia o mesmo valor
+para VI e para conclusões antecipadas de RSP/SI, fazendo o RT64 apresentar a
+65–77 Hz com intervalos irregulares. Separar os eventos revelou que o scheduler
+ocioso não apresentava seus VIs; a forma final moveu a apresentação para o
+próprio pulso VI. Assim todos os caminhos apresentam uma vez por retrace.
+
+O tracing detalhado por função também foi retirado do perfil normal e tornou-se
+opt-in por `WPJ2_TRACE_DETAIL=1`. As métricas completas estão em
+`analise/projeto/performance_cadencia.md`. Ainda existem picos ocasionais acima
+de 33 ms ligados ao trabalho cooperativo de CPU/RSP e parcialmente à fila de
+áudio, mas o RT64 em si mede apenas 0,032 ms por apresentação em média.
+
+---
+
+# 45. Perfil normal enxuto e estabilidade após reinício — 29/08/2026
+
+Depois de reiniciar o computador, o usuário repetiu o corredor e informou que
+o engasgo visual aparentemente desapareceu. Uma nova execução também foi vista
+como praticamente fluida. Como isso sugere contenção externa/driver, a ordem
+síncrona SP/DP validada foi preservada.
+
+A revisão eliminou trabalho diagnóstico que ainda ocorria durante o jogo:
+
+- o perfil padrão não grava mais WAV; a reprodução WinMM continua ativa;
+- logs contínuos de tradução ficaram restritos a `TESTAR.bat legendas`;
+- 42 `printf` residuais de antigas sondas de carregamento foram desativados no
+  build normal;
+- `RecompiledFuncsStateful` passou a ser compilado com `/O2`.
+
+O slot 1 foi executado por 45 s com áudio, tradução e RT64/Vulkan: sem trava,
+60,000 apresentações/s nas métricas internas, nenhum WAV indevido e nenhum
+novo atraso acima de 33 ms depois do aquecimento inicial. Os testes unitários
+das continuations e da restauração de OSThread continuam OK. A medição externa
+por `gdigrab` foi rejeitada porque não lê corretamente a swapchain Vulkan; não
+se confunde mais submissão interna com fluidez visual comprovada.
+
+---
+
+# 46. Cadência visual do menu e interpolação RT64 — 29/08/2026
+
+O menu salvo no slot 2 foi isolado. Uma execução PT-BR e outra sem tradução
+tiveram comportamento praticamente idêntico, descartando o catálogo como
+gargalo principal. A apresentação da janela ocorre em 60 Hz, mas o jogo produz
+novas tarefas gráficas nesse menu em intervalos de aproximadamente 33 e 50 ms;
+por isso repetir o último framebuffer a 60 Hz ainda parece engasgado.
+
+A ponte RT64 usava `RefreshRate::Original`, apesar de o backend de referência
+já oferecer interpolação nativa de frames, transformações e tiles. O padrão foi
+alterado para `RefreshRate::Display`, preservando a cadência lógica original e
+interpolando somente a apresentação até a taxa do monitor. O modo antigo pode
+ser comparado com `WPJ2_RT64_REFRESH=original`.
+
+O teste automático restaurou explicitamente `slot2.wpstate`, movimentou o
+cursor nos quatro sentidos durante 15 s e terminou sem trava. Houve uma rodada
+anterior inválida no slot 1: `WPJ2_STATEFUL_LOAD_ON_START=1` também seleciona o
+slot 1; ela foi descartada e a repetição correta usou o valor `2`. A avaliação
+visual do usuário ainda é necessária, pois métricas internas de apresentação
+não provam a fluidez percebida na swapchain Vulkan.
+
+O usuário confirmou que o cursor permaneceu engasgado. A instrumentação interna
+do RT64 mostrou `swap=60 target=60 original=0`: a interpolação não chegou a ser
+usada, pois o backend exige uma taxa original válida. O padrão foi restaurado
+para `RefreshRate::Original`.
+
+A corrida revelou ainda que o perfil normal continuava com `WPJ2_DEBUG` ligado
+por padrão na build de sondagem. Isso fazia uma segunda interpretação completa
+de cada display list para estatísticas, tracing/console contínuo e exportações
+automáticas. `TESTAR.bat` agora força `WPJ2_DEBUG=0` nos perfis `padrao` e
+`sem_legendas`; apenas os perfis de análise reativam a telemetria.
+
+---
+
+# 47. Interpolação RT64 efetiva e fila de áudio do menu — 29/08/2026
+
+A taxa nativa não chegava à ponte RT64: mudar somente para `Display` mantinha
+`original=0` e nenhum quadro era interpolado. A ponte agora injeta 30 fps antes
+de cada display list. A sonda confirmou `original=30`, `target=60` e dois
+quadros por imagem, portanto `TESTAR.bat` voltou a usar `Display` como padrão.
+
+Áudio, VI e GFX foram registrados na mesma timeline. O dispositivo de áudio
+esvaziava durante as rajadas de produção, confirmando que o sintoma sonoro não
+era impressão visual. Foi acrescentado pré-buffer configurável, correção linear
+limitada por profundidade e reconstituição da reserva após underflow. Seis
+blocos reduziram os esvaziamentos medidos de cinco para três em 30 s; isso fica
+documentado como mitigação, não como correção completa.
+
+O caminho release também deixou de imprimir/forçar logs em disco a cada tecla
+e leitura do PIF. `WPJ2_DEBUG=1` continua oferecendo a telemetria completa nos
+perfis especializados. A hipótese de transformar o pendente da AI num contador
+de dois slots piorou a cadência no comparativo e foi revertida.
+
+---
+
+# 48. Correção estrutural da cadência — 29/08/2026
+
+A conclusão do item 47 sobre 30 fps foi substituída por medição do registrador
+real: `VI_ORIGIN` alterna a 60,00 Hz nos slots 1, 2 e 3. A ponte RT64 agora
+informa 60 Hz; contar display lists confundia composição com frame apresentado.
+
+O defeito central era `hle_deliver_events` dormir também dentro de uma thread
+executável. Só o dispatcher ocioso pode esperar pelo próximo VI; `RECOMP_POLL`
+agora consulta o prazo sem bloquear. GFX passou de 51,97/25,31/21,24 tarefas por
+segundo nos slots 1/2/3 para 60,00/48,78/51,77, enquanto o áudio estabilizou em
+aproximadamente 30 blocos/s nos três.
+
+Depois disso, a compensação adaptativa de áudio tornou-se contraproducente:
+enchia os oito slots e fazia a thread esperar 5--12 ms. Ela foi removida. A
+saída final usa pré-buffer de quatro blocos, doze slots e espera zero. No slot 3
+foram medidos VI 60,04 Hz, GFX 60,04/s, `VI_ORIGIN` 59,93 Hz, áudio 29,96/s,
+zero underflows, zero descartes e zero esperas. Os testes de continuation e
+restauração de OSThread permanecem aprovados.

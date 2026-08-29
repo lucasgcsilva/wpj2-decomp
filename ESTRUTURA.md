@@ -20,6 +20,7 @@ project-wonder-j2-decomp/
 │   ├── gerado/                # fontes geradas por ferramentas
 │   ├── RecompiledFuncs/       # saída C do N64Recomp
 │   ├── RecompiledFuncsTraced/ # variante instrumentada para sondas
+│   ├── RecompiledFuncsStateful/# variante gerada com continuations
 │   ├── rt64_bridge/           # ponte gráfica nativa opcional para RT64
 │   ├── scripts/               # scripts próprios de análise e preparação
 │   └── tests/                 # testes unitários do runtime
@@ -65,6 +66,8 @@ Reúne material próprio que não pertence diretamente ao runtime:
 - `tests/`: testes pequenos e determinísticos;
 - `RecompiledFuncs/`: C gerado diretamente pelo N64Recomp;
 - `RecompiledFuncsTraced/`: cópia gerada com instrumentação;
+- `RecompiledFuncsStateful/`: cópia descartável transformada para a ABI de
+  continuations; regenerada por `tools/build_stateful_codegen.cmd`;
 - `gerado/`: outras saídas geradas, como o microcódigo de áudio recompilado.
 
 Os diretórios gerados não devem ser editados manualmente nem versionados.
@@ -161,14 +164,37 @@ Ao final de cada ciclo, `temp/` deve voltar a conter somente `README.md`.
   `build\rt64_runtime`.
 - F5 captura a área cliente realmente composta pelo RT64, inclusive após
   redimensionamento, e mantém no mesmo perfil os metadados/RDRAM/AList.
+- Toda execução pelo `TESTAR.bat` grava em `traducao_ausentes.tsv` somente as
+  frases provavelmente inglesas que chegaram ao formatador e não possuem
+  chave EN nem forma PT-BR reconhecida no catálogo. O arquivo é deduplicado;
+  frases PT-BR dinâmicas com nomes inseridos são filtradas.
+- `traducao_validacao.tsv` registra, para cada cadeia observada, o texto
+  identificado antes da troca, o PT-BR esperado e o texto final realmente
+  entregue ao formatador. `DIVERGENTE` pode indicar quebra automática de
+  layout; sempre comparar as três colunas antes de tratar como erro.
+- O `.txt` produzido pelo F5 inclui os bancos `SpriteObj` e suas coordenadas.
+  Para mapear Bird/cursor, posicione-o no alvo e capture; não estime a posição
+  apenas pelo screenshot.
 - A janela é redimensionável, preserva a proporção 4:3 durante o arraste e tem
   cliente mínimo de 320×240. Segurar F11 solicita avanço de 8×; soltar restaura
   imediatamente a cadência e o áudio normais.
 - A janela não possui limite artificial de tempo; fechá-la encerra o teste e o
   terminal associado.
-- `F2` sobrescreve `sav/bookmarks/quick.replay`, sua imagem e metadados. `F4`
-  pede ao próprio `TESTAR.bat` um reinício e reproduz em turbo as entradas até
-  o ponto salvo. Ele não restaura RDRAM sobre fibers antigas.
+- `TESTAR.bat stress 300 7` ainda pode reproduzir um bookmark legado em turbo e, somente
+  depois do alvo exato, alterna de forma determinística A/B, D-Pad, C-Buttons,
+  Z, L/R e analógico durante 300 segundos, usando seed 7. Após o replay, a
+  cadência é elevada de 60 para 480 Hz. Vídeo, áudio, CPU, filas e watchdog
+  continuam processados; apenas a apresentação e a reprodução sonora são
+  ocultadas para o teste automatizado.
+- `TESTAR.bat stress_loja 150` é o roteiro dirigido da loja. Ele reconhece
+  frases do tutorial como marcos e, depois de calibrado com um F5 sobre o
+  computador, testa Comprar e navegação repetida à direita.
+- `Ctrl+Shift+1..9` sobrescreve `sav/bookmarks/slotN.wpstate` em um limite seguro do
+  scheduler. `Ctrl+1..9` restaura o slot no mesmo processo, sem fechar a janela.
+  O snapshot contém RDRAM, contextos/continuations das OSThreads e estado
+  lógico de HLE, RSP, PIF e áudio; RT64 e buffers de áudio hospedados são
+  descartados e reconstruídos. `quick.replay` permanece apenas para os perfis
+  antigos de stress e não participa do uso interativo.
 - O script limpa os artefatos antigos do perfil antes da execução, mas a
   limpeza final de toda a pasta `temp` ocorre somente depois da análise.
 - Quando uma hipótese exigir outra configuração, modificar este arquivo e
@@ -206,3 +232,6 @@ terceiras clonadas em `tools/`.
 - O áudio usa por padrão o microcódigo nativo validado; estalos esparsos são
   refinamento de fidelidade, documentado em `ANALISE_AUDIO.md`.
 - Lacunas visuais adiadas estão em `PENDENCIAS.md`.
+- O build principal usa `RecompiledFuncsStateful` e `sched_stateful.c`; não
+  reintroduzir fibers no caminho F2/F4. Alterações no código recompilado devem
+  ser regeneradas por `tools/build_stateful_codegen.cmd`.

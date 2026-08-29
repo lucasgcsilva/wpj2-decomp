@@ -44,17 +44,19 @@ static volatile uint16_t g_buttons = 0;
  * definicao com inicializador fica mais abaixo, junto dos roteiros. */
 static int g_roteiro_n;
 static int g_roteiro_poll_n;
+static int g_roteiro_retrace_n;
 /* Definicao tentativa: o contador vive mais abaixo, junto do roteiro por
    leitura, mas a gravacao de reproducao precisa dele aqui em cima. */
 static uint64_t g_polls_controle;
 static int8_t g_stick_x = 0, g_stick_y = 0;
 
 static void cancelar_roteiro_por_entrada_ao_vivo(void) {
-    if (g_roteiro_n || g_roteiro_poll_n) {
+    if (g_roteiro_n || g_roteiro_poll_n || g_roteiro_retrace_n) {
         printf("entr : entrada ao vivo; roteiro gravado cancelado\n");
         fflush(stdout);
         g_roteiro_n = 0;
         g_roteiro_poll_n = 0;
+        g_roteiro_retrace_n = 0;
     }
 }
 
@@ -99,12 +101,16 @@ void pif_set_buttons(uint16_t b) {
  * inconsistencia: e uma execucao normal, so que com a entrada vindo de um
  * roteiro em vez do teclado.
  *
- * O indice e a CONTAGEM DE LEITURAS do controle, nao o relogio. Milissegundos
- * escorregam conforme a carga do host - foi o motivo de g_roteiro_poll existir
- * - enquanto a n-esima leitura e sempre a n-esima leitura. */
+ * A versao 2 usa o RETRACE emulado. A contagem de leituras parecia uma base
+ * deterministica, mas muda quando uma thread consulta o PIF uma vez a mais ou
+ * a menos por causa da cadencia das fibers. O retrace e o relogio logico que o
+ * proprio jogo observa e permanece estavel quando o host esta mais lento ou
+ * quando o replay omite video/audio para acelerar. O poll continua gravado no
+ * arquivo somente para diagnostico e compatibilidade com bookmarks v1. */
 #define GRAVACAO_MAX 4096
 static struct {
     uint64_t poll;
+    uint64_t retrace;
     uint16_t botoes;
     int8_t stick_x, stick_y;
 } g_gravacao[GRAVACAO_MAX];
@@ -122,6 +128,7 @@ void pif_gravar_transicao(uint16_t b) {
     ultimo_y = g_stick_y;
     if (g_gravacao_n < GRAVACAO_MAX) {
         g_gravacao[g_gravacao_n].poll = g_polls_controle;
+        g_gravacao[g_gravacao_n].retrace = hle_retraces();
         g_gravacao[g_gravacao_n].botoes = b;
         g_gravacao[g_gravacao_n].stick_x = g_stick_x;
         g_gravacao[g_gravacao_n].stick_y = g_stick_y;
@@ -132,21 +139,21 @@ void pif_gravar_transicao(uint16_t b) {
 int pif_gravar_replay(const char* caminho) {
     FILE* f = fopen(caminho, "w");
     if (!f) return 0;
-    /* Formato deliberadamente igual ao aceito por WPJ2_INPUT_POLLS, para poder
-       colar direto numa linha de comando sem conversao. */
-    fprintf(f, "# reproducao wpj2: alvo=%llu leituras\n",
-            (unsigned long long)g_polls_controle);
-    fprintf(f, "alvo=%llu\n", (unsigned long long)g_polls_controle);
-    fprintf(f, "roteiro=");
+    fprintf(f, "# WPJ2 bookmark versionado; v2 usa o retrace emulado\n");
+    fprintf(f, "formato=WPJ2_BOOKMARK_2\n");
+    fprintf(f, "alvo_poll=%llu\n", (unsigned long long)g_polls_controle);
+    fprintf(f, "alvo_retrace=%llu\n", (unsigned long long)hle_retraces());
+    fprintf(f, "roteiro_retrace=");
     for (unsigned i = 0; i < g_gravacao_n; i++)
         fprintf(f, "%s%llu:%04X@%d,%d", i ? ";" : "",
-                (unsigned long long)g_gravacao[i].poll,
+                (unsigned long long)g_gravacao[i].retrace,
                 g_gravacao[i].botoes, (int)g_gravacao[i].stick_x,
                 (int)g_gravacao[i].stick_y);
     fprintf(f, "\n");
     fclose(f);
-    printf("[replay] gravado %s: %u transicao(oes), alvo %llu leituras\n",
-           caminho, g_gravacao_n, (unsigned long long)g_polls_controle);
+    printf("[replay] gravado %s: %u transicao(oes), alvo retrace=%llu poll=%llu\n",
+           caminho, g_gravacao_n, (unsigned long long)hle_retraces(),
+           (unsigned long long)g_polls_controle);
     fflush(stdout);
     return 1;
 }
@@ -191,8 +198,64 @@ static struct {
     uint8_t tem_stick;
 } g_roteiro_poll[ROTEIRO_MAX];
 static int g_roteiro_poll_n = 0;
+static struct {
+    uint64_t retrace;
+    uint16_t botoes;
+    int8_t stick_x, stick_y;
+    uint8_t tem_stick;
+} g_roteiro_retrace[ROTEIRO_MAX];
+static int g_roteiro_retrace_n = 0;
 static uint64_t g_polls_controle = 0;
 static uint32_t g_polls_controle_logados = 0;
+static int g_stress_enabled;
+static int g_stress_shop;
+static uint32_t g_stress_seed = 1u;
+static uint64_t g_stress_start_poll;
+static uint64_t g_shop_repeat_prompt_poll;
+static uint64_t g_shop_computer_hint_poll;
+static uint64_t g_shop_hover_poll;
+
+static int stress_text_contains(const uint8_t* text, size_t bytes,
+                                const char* needle) {
+    size_t n = strlen(needle);
+    if (!text || !n || bytes < n) return 0;
+    for (size_t i = 0; i + n <= bytes; i++)
+        if (!memcmp(text + i, needle, n)) return 1;
+    return 0;
+}
+
+void pif_stress_shop_text_hint(const uint8_t* text, size_t bytes) {
+    if (!g_stress_enabled || !g_stress_shop) return;
+    if (!g_shop_repeat_prompt_poll && (stress_text_contains(text, bytes,
+            "Shall I repeat what I said regarding Bird?") ||
+        stress_text_contains(text, bytes,
+            "Quer que eu repita o que disse sobre Bird?"))) {
+        g_shop_repeat_prompt_poll = g_polls_controle;
+        printf("entr : prompt final do tutorial detectado no poll %llu\n",
+               (unsigned long long)g_shop_repeat_prompt_poll);
+        fflush(stdout);
+    }
+    if (!g_shop_computer_hint_poll && (stress_text_contains(text, bytes,
+            "Computershop in the control room!") ||
+        stress_text_contains(text, bytes,
+            "Loja de Computadores, na sala de controle!"))) {
+        g_shop_computer_hint_poll = g_polls_controle;
+        printf("entr : mencao ao computador detectada no poll %llu\n",
+               (unsigned long long)g_shop_computer_hint_poll);
+        fflush(stdout);
+    }
+    /* Diferente da mencao no tutorial, a string curta "Loja" so e formatada
+     * quando o cursor Bird esta de fato sobre o terminal. Ela funciona como
+     * sensor de colisao/hover e elimina o Z dado em coordenada aproximada. */
+    if (g_shop_computer_hint_poll && !g_shop_hover_poll && bytes >= 5u &&
+        !memcmp(text, "Loja", 4u) && text[4] == 0 &&
+        g_polls_controle > g_shop_computer_hint_poll + 900u) {
+        g_shop_hover_poll = g_polls_controle;
+        printf("entr : hover real da Loja detectado no poll %llu\n",
+               (unsigned long long)g_shop_hover_poll);
+        fflush(stdout);
+    }
+}
 
 void pif_set_script(const char* s) {
     g_roteiro_n = 0;
@@ -243,8 +306,186 @@ void pif_set_poll_script(const char* s) {
     printf("entr : roteiro por leitura com %d passo(s)\n", g_roteiro_poll_n);
 }
 
+void pif_set_retrace_script(const char* s) {
+    g_roteiro_retrace_n = 0;
+    while (s && *s && g_roteiro_retrace_n < ROTEIRO_MAX) {
+        char* fim = NULL;
+        unsigned long long retrace = strtoull(s, &fim, 10);
+        if (!fim || *fim != ':') break;
+        unsigned long b = strtoul(fim + 1, &fim, 16);
+        g_roteiro_retrace[g_roteiro_retrace_n].retrace = (uint64_t)retrace;
+        g_roteiro_retrace[g_roteiro_retrace_n].botoes = (uint16_t)b;
+        g_roteiro_retrace[g_roteiro_retrace_n].stick_x = 0;
+        g_roteiro_retrace[g_roteiro_retrace_n].stick_y = 0;
+        g_roteiro_retrace[g_roteiro_retrace_n].tem_stick = 0;
+        if (fim && *fim == '@') {
+            long x = strtol(fim + 1, &fim, 10);
+            long y = 0;
+            if (fim && *fim == ',') y = strtol(fim + 1, &fim, 10);
+            if (x < -128) x = -128;
+            if (x > 127) x = 127;
+            if (y < -128) y = -128;
+            if (y > 127) y = 127;
+            g_roteiro_retrace[g_roteiro_retrace_n].stick_x = (int8_t)x;
+            g_roteiro_retrace[g_roteiro_retrace_n].stick_y = (int8_t)y;
+            g_roteiro_retrace[g_roteiro_retrace_n].tem_stick = 1;
+        }
+        g_roteiro_retrace_n++;
+        if (!fim || *fim != ';') break;
+        s = fim + 1;
+    }
+    g_t0 = GetTickCount();
+    printf("entr : roteiro por retrace com %d passo(s)\n",
+           g_roteiro_retrace_n);
+}
+
+void pif_set_stress(const char* seed_text, uint64_t after_poll) {
+    g_stress_shop = seed_text && !_stricmp(seed_text, "shop");
+    unsigned long seed = seed_text && *seed_text && !g_stress_shop
+                       ? strtoul(seed_text, NULL, 0) : 1u;
+    g_stress_seed = seed ? (uint32_t)seed : 1u;
+    g_shop_repeat_prompt_poll = 0;
+    g_shop_computer_hint_poll = 0;
+    g_shop_hover_poll = 0;
+    g_stress_start_poll = after_poll + 120u;
+    if (g_stress_start_poll < g_polls_controle + 120u)
+        g_stress_start_poll = g_polls_controle + 120u;
+    for (int i = 0; i < g_roteiro_poll_n; i++)
+        if (g_roteiro_poll[i].poll + 120u > g_stress_start_poll)
+            g_stress_start_poll = g_roteiro_poll[i].poll + 120u;
+    g_stress_enabled = 1;
+    printf("entr : stress deterministico modo=%s seed=%u a partir do poll %llu\n",
+           g_stress_shop ? "loja" : "geral", g_stress_seed,
+           (unsigned long long)g_stress_start_poll);
+    fflush(stdout);
+}
+
 /* O estado corrente e o ultimo passo cujo instante ja passou. */
 static uint16_t botoes_agora(void) {
+    if (g_stress_enabled && g_polls_controle >= g_stress_start_poll) {
+        uint64_t delta = g_polls_controle - g_stress_start_poll;
+        if (g_stress_shop) {
+            g_stick_x = g_stick_y = 0;
+            /* O bookmark atual termina ainda no tutorial "Move Bird...".
+             * Z durante esse texto e descartado pelo jogo. Primeiro avance as
+             * paginas com toques de A suficientemente separados, depois deixe
+             * a cena estabilizar antes de abrir o computador. */
+            if (!g_shop_repeat_prompt_poll)
+                return ((delta % 18u) < 3u) ? 0x8000u : 0u;
+            uint64_t after_prompt = g_polls_controle - g_shop_repeat_prompt_poll;
+            if (after_prompt < 120u) return 0;
+            /* B responde negativamente ao pedido de repetir e fecha a lista
+             * de topicos. Agora o pulso ocorre relativo ao texto observado. */
+            if (after_prompt < 420u)
+                return ((after_prompt % 18u) < 3u) ? 0x4000u : 0u;
+            /* Depois de fechar a lista ainda ha monologo/tutorial. Continue
+             * com A ate a propria fala localizar a Loja de Computadores. */
+            if (!g_shop_computer_hint_poll)
+                return ((after_prompt % 18u) < 3u) ? 0x8000u : 0u;
+            uint64_t after_computer = g_polls_controle - g_shop_computer_hint_poll;
+            if (after_computer < 900u)
+                return ((after_computer % 18u) < 3u) ? 0x8000u : 0u;
+            uint16_t avanca_fala = ((after_computer % 18u) < 3u)
+                                      ? 0x8000u : 0u;
+            if (after_computer < 1200u) return avanca_fala;
+            if (g_shop_hover_poll) {
+                uint64_t after_hover = g_polls_controle - g_shop_hover_poll;
+                if (after_hover < 24u) return 0;
+                if (after_hover < 32u) return 0x2000u; /* Z: usa computador */
+                /* O menu Comprar/Vender so aceita A depois da fala de Bird.
+                 * A distancia vem das capturas manuais f5_001..003. */
+                if (after_hover < 1100u) return 0;
+                if (after_hover < 1108u) return 0x8000u; /* A: Comprar */
+                if (after_hover < 1500u) return 0;
+                return (((after_hover - 1500u) / 3u) & 1u) ? 0u : 0x0100u;
+            }
+            if (after_computer < 1248u) {
+                /* Medido na execucao manual que produziu f5_001 em 28/08:
+                 * Bird chegou ao terminal "Loja" com 48 leituras de
+                 * esquerda+baixo (-80,-80). O eixo Y nao e o de coordenadas
+                 * da tela; a tentativa anterior usava cima e errava o alvo. */
+                g_stick_x = -80;
+                g_stick_y = -80;
+                return avanca_fala;
+            }
+            if (after_computer < 1291u) {
+                /* O log completo mostra que esquerda permaneceu mais 43
+                 * leituras depois de soltar o eixo vertical: 91 no total. */
+                g_stick_x = -80;
+                return avanca_fala;
+            }
+            if (after_computer < 1460u) {
+                /* A posicao inicial varia com o replay. Se a trajetoria
+                 * manual nao encontrou o painel, ancore no canto superior
+                 * esquerdo antes de uma busca deterministica. */
+                g_stick_x = -80;
+                g_stick_y = 80;
+                return avanca_fala;
+            }
+            /* Varredura serpentina da area apontavel. A velocidade menor da
+             * horizontal evita atravessar a hitbox entre dois quadros; ao
+             * aparecer o texto exato "Loja", g_shop_hover_poll interrompe a
+             * busca e a sequencia Z/A acima assume o controle. */
+            {
+                uint64_t scan = after_computer - 1460u;
+                uint64_t faixa = 236u;
+                uint64_t linha = scan / faixa;
+                uint64_t passo = scan % faixa;
+                if (linha < 18u) {
+                    if (passo < 220u)
+                        g_stick_x = (linha & 1u) ? -35 : 35;
+                    else
+                        g_stick_y = -45;
+                }
+            }
+            return avanca_fala;
+        }
+        static const uint16_t buttons[] = {
+            0x8000, 0x0000, /* A */
+            0x0100, 0x0000, /* direita */
+            0x0400, 0x0000, /* baixo */
+            0x8000, 0x0000, /* confirma */
+            0x4000, 0x0000, /* B */
+            0x0200, 0x0000, /* esquerda */
+            0x0800, 0x0000, /* cima */
+            0x0001, 0x0000, /* C-direita */
+            0x0004, 0x0000, /* C-baixo */
+            0x0002, 0x0000, /* C-esquerda */
+            0x0008, 0x0000, /* C-cima */
+            0x2000, 0x0000, /* Z */
+            0x0010, 0x0000, /* R */
+            0x0020, 0x0000  /* L */
+        };
+        uint64_t step = (g_polls_controle - g_stress_start_poll) / 3u;
+        uint32_t index = (uint32_t)((step + g_stress_seed) %
+                         (sizeof(buttons) / sizeof(buttons[0])));
+        /* Quatro direcoes analogicas entram uma vez a cada ciclo completo. */
+        uint32_t cycle = (uint32_t)(step /
+                         (sizeof(buttons) / sizeof(buttons[0]))) & 3u;
+        if ((index & 1u) == 0u && index >= 14u && index <= 20u) {
+            static const int8_t sx[4] = { 80, 0, -80, 0 };
+            static const int8_t sy[4] = { 0, 80, 0, -80 };
+            g_stick_x = sx[cycle];
+            g_stick_y = sy[cycle];
+        } else if (index & 1u) {
+            g_stick_x = 0;
+            g_stick_y = 0;
+        }
+        return buttons[index];
+    }
+    if (g_roteiro_retrace_n) {
+        uint16_t b = 0;
+        uint64_t agora = hle_retraces();
+        for (int i = 0; i < g_roteiro_retrace_n; i++) {
+            if (g_roteiro_retrace[i].retrace > agora) continue;
+            b = g_roteiro_retrace[i].botoes;
+            if (g_roteiro_retrace[i].tem_stick) {
+                g_stick_x = g_roteiro_retrace[i].stick_x;
+                g_stick_y = g_roteiro_retrace[i].stick_y;
+            }
+        }
+        return b;
+    }
     if (g_roteiro_poll_n) {
         uint16_t b = 0;
         for (int i = 0; i < g_roteiro_poll_n; i++) {
@@ -288,6 +529,35 @@ static uint64_t g_pif_cmds = 0;
  * ponto de entrega do HLE. */
 static uint32_t g_si_done = 0;
 
+void pif_state_capture(wpj2_pif_state_image* image) {
+    if (!image) return;
+    memset(image, 0, sizeof(*image));
+    memcpy(image->pif, g_pif, sizeof(g_pif));
+    image->si_done = g_si_done;
+    image->si_reads = g_si_reads;
+    image->si_writes = g_si_writes;
+    image->pif_commands = g_pif_cmds;
+    image->controller_polls = g_polls_controle;
+    image->stick_x = g_stick_x;
+    image->stick_y = g_stick_y;
+}
+
+void pif_state_restore(const wpj2_pif_state_image* image) {
+    if (!image) return;
+    memcpy(g_pif, image->pif, sizeof(g_pif));
+    g_si_done = image->si_done;
+    g_si_reads = image->si_reads;
+    g_si_writes = image->si_writes;
+    g_pif_cmds = image->pif_commands;
+    g_polls_controle = image->controller_polls;
+    g_stick_x = image->stick_x;
+    g_stick_y = image->stick_y;
+    /* Uma tecla fisicamente solta nao pode reaparecer pressionada apenas
+     * porque estava assim no instante do snapshot. O proximo WM_KEY atualiza
+     * normalmente a entrada viva. */
+    g_buttons = 0;
+}
+
 uint64_t pif_si_reads(void)  { return g_si_reads; }
 uint64_t pif_si_writes(void) { return g_si_writes; }
 uint64_t pif_commands(void)  { return g_pif_cmds; }
@@ -309,6 +579,7 @@ void pif_take_si_done(void) { if (g_si_done) g_si_done--; }
  * esperando uma mensagem que nunca chega - e o valor que o roteiro entregaria
  * AGORA, independente de existir alguem para le-lo. */
 void pif_relatorio_periodico(void) {
+    if (!runtime_diagnostics_enabled()) return;
     static DWORD base = 0, proximo = 0;
     DWORD agora = GetTickCount();
     if (base == 0) { base = agora; proximo = agora; }
@@ -425,8 +696,9 @@ static void pif_process(int refresh) {
                 static uint16_t ultimo = 0;
                 static int8_t ultimo_x = 0, ultimo_y = 0;
                 static int primeira = 1;
-                if (b != ultimo || g_stick_x != ultimo_x ||
-                    g_stick_y != ultimo_y || primeira) {
+                if (runtime_diagnostics_enabled() &&
+                    (b != ultimo || g_stick_x != ultimo_x ||
+                     g_stick_y != ultimo_y || primeira)) {
                     primeira = 0;
                     printf("[pif] MUDOU botoes=%04X stick=%d,%d na leitura %llu\n",
                            b, (int)g_stick_x, (int)g_stick_y,
@@ -436,7 +708,7 @@ static void pif_process(int refresh) {
                     ultimo_x = g_stick_x;
                     ultimo_y = g_stick_y;
                 }
-                if (g_polls_controle_logados++ < 32) {
+                if (runtime_diagnostics_enabled() && g_polls_controle_logados++ < 32) {
                     printf("[pif] leitura=%llu tempo=%lu ms botoes=%04X stick=%d,%d\n",
                            (unsigned long long)g_polls_controle,
                            (unsigned long)(GetTickCount() - g_t0), b,

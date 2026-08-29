@@ -15,7 +15,9 @@ func_800CCA8C   # __osEnqueueThread: unico ponto onde se sabe em que fila a thre
 func_800D5060   # __osEPiRawStartDma: o caminho de DMA que o gerenciador de PI usa
 func_800CD4F0   # __osSiRawStartDma: troca com o PIF, para o jogo enxergar um controle
 func_800CD010   # __osSpSetStatus: SP_STATUS e comando na escrita, nao dado
+func_800CD020   # __osSpSetPc: consulta o estado real do RSP, nao o espelho MMIO
 func_800CD060   # __osSpRawStartDma: e por aqui que a OSTask fica visivel
+func_800CD0F0   # __osSpDeviceBusy: DMA do runtime e sincrona e termina na chamada
 func_800BC6EC   # alocador do heap: wrapper diagnostico preserva o corpo recompilado
 func_800BD218   # copia sincrona de recurso ROM->RDRAM; fila PI ainda nao entrega o payload
 func_800CCC60   # wrapper publico do heap: conserva o chamador do jogo para diagnostico

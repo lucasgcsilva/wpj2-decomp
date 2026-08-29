@@ -13,6 +13,9 @@
 #include <string.h>
 
 #include "runtime.h"
+#ifdef RECOMP_STATEFUL
+#include "continuation.h"
+#endif
 #include "video.h"
 #include "funcs.h"
 #include "video.h"
@@ -123,6 +126,23 @@ void func_80090E58(uint8_t* rdram, recomp_context* ctx) {
     uint32_t args_phys = args & 0x1FFFFFFFu;
     if (args_phys + 4u <= 0x00400000u) {
         uint32_t source = (uint32_t)MEM_W(0, (gpr)(int32_t)args);
+        uint8_t source_snapshot[512];
+        size_t source_snapshot_n = 0;
+        uint32_t source_snapshot_phys = source & 0x1FFFFFFFu;
+        if (source_snapshot_phys < 0x00800000u) {
+            while (source_snapshot_n + 1u < sizeof(source_snapshot) &&
+                   source_snapshot_phys + source_snapshot_n < 0x00800000u) {
+                uint8_t b = rdram[(source_snapshot_phys +
+                                  (uint32_t)source_snapshot_n) ^ 3u];
+                source_snapshot[source_snapshot_n++] = b;
+                if (!b) break;
+            }
+        }
+        pif_stress_shop_text_hint(source_snapshot, source_snapshot_n);
+        /* A rota anterior ao formatador representa 'ã' como 0x7F para nao
+         * colidir com o operador '%'. Agora o texto ja foi formatado e 0x25
+         * volta a significar exclusivamente o glifo instalado. */
+        legendas_finalizar_pos_formatador(rdram, source);
         /* Mesma logica do carregador: aqui tambem temos o endereco publicado
          * (args e char**), entao a realocacao e possivel nesta rota.
          *
@@ -139,16 +159,25 @@ void func_80090E58(uint8_t* rdram, recomp_context* ctx) {
             fmt = (e && *e) ? (*e != '0') : 1;
         }
         uint32_t realoc_fmt = 0;
+        int reconhecido_fmt = 0;
         if (fmt) {
-            int reconhecido = legendas_realocar_recurso(rdram, source,
+            reconhecido_fmt = legendas_realocar_recurso(rdram, source,
                                                          &realoc_fmt);
-            if (!reconhecido)
-                reconhecido = legendas_realocar_recurso_composto(
+            if (!reconhecido_fmt)
+                reconhecido_fmt = legendas_realocar_recurso_composto(
                     rdram, source, &realoc_fmt);
-            if (reconhecido && realoc_fmt)
+            if (reconhecido_fmt && realoc_fmt)
                 MEM_W(0, (gpr)(int32_t)args) = (gpr)(int32_t)realoc_fmt;
         } else {
-            legendas_substituir_recurso(rdram, source);
+            reconhecido_fmt = legendas_substituir_recurso(rdram, source);
+        }
+        legendas_auditar_texto_consumido(rdram, source, trace_last_func(),
+                                          reconhecido_fmt);
+        {
+            uint32_t printed = (uint32_t)MEM_W(0, (gpr)(int32_t)args);
+            legendas_auditar_correspondencia(
+                rdram, source, source_snapshot, source_snapshot_n, printed,
+                trace_last_func(), reconhecido_fmt);
         }
         /* Auditoria opt-in da entrada EXATA do formatador. Os rotulos da tela
          * de saves nao aparecem como ASCII nem no cartucho nem no dump final;
@@ -491,10 +520,20 @@ void func_80094230__replaced(uint8_t* rdram, recomp_context* ctx);
 typedef struct {
     uint32_t caller, a0, a1, a2, a3;
     uint32_t tabela, fonte;
+    int32_t x, y;
+    int16_t estado, subestado;
     uint8_t primeiro_byte, modo;
 } texto_log_t;
 static texto_log_t g_texto_log[TEXTO_LOG_MAX];
 static uint32_t g_texto_chamadas = 0, g_texto_log_n = 0;
+/* Alguns rotulos de menu sao compostos apenas ao entrar na tela e depois o
+ * atlas e reutilizado. O anel antigo de 8.192 amostras os perdia antes de o
+ * usuario apertar F5. O replay automatizado mostrou cerca de 404 mil chamadas
+ * ate o encerramento diagnostico; 524.288 conserva a entrada inteira sem
+ * gravar em disco a cada glifo. */
+#define TEXTO_RING_MAX 524288u
+static texto_log_t g_texto_ring[TEXTO_RING_MAX];
+static uint64_t g_texto_ring_total = 0;
 
 void func_80094230(uint8_t* rdram, recomp_context* ctx) {
     legendas_conferir_marca(rdram, "94230-entra");
@@ -564,12 +603,48 @@ void func_80094230(uint8_t* rdram, recomp_context* ctx) {
             }
         }
     }
-    if (g_texto_log_n < TEXTO_LOG_MAX && fonte < 0x800000u) {
-        g_texto_log[g_texto_log_n++] = (texto_log_t){
+    if (fonte < 0x800000u) {
+        texto_log_t sample = {
             trace_last_func(), a0, (uint32_t)ctx->r5, (uint32_t)ctx->r6,
-            (uint32_t)ctx->r7, tabela, fonte, rdram[fonte ^ 3u], (uint8_t)modo };
+            (uint32_t)ctx->r7, tabela, fonte,
+            (int32_t)rdram32(rdram, 0x00156B98u),
+            (int32_t)rdram32(rdram, 0x00156BA0u),
+            (int16_t)rdram16(rdram, 0x001A7234u),
+            (int16_t)rdram16(rdram, 0x001A723Cu),
+            rdram[fonte ^ 3u], (uint8_t)modo
+        };
+        if (g_texto_log_n < TEXTO_LOG_MAX)
+            g_texto_log[g_texto_log_n++] = sample;
+        static int ring_enabled = -1;
+        if (ring_enabled < 0) {
+            const char* e = getenv("WPJ2_F5_GLIFOS");
+            ring_enabled = e && *e && *e != '0';
+        }
+        if (ring_enabled) {
+            g_texto_ring[g_texto_ring_total % TEXTO_RING_MAX] = sample;
+            g_texto_ring_total++;
+        }
     }
     func_80094230__replaced(rdram, ctx);
+}
+
+void hle_texto_capture(const char* directory, unsigned id) {
+    if (!directory || !*directory) return;
+    char path[MAX_PATH + 80];
+    snprintf(path, sizeof(path), "%s\\glifos_f5_%03u.tsv", directory, id);
+    FILE* f = fopen(path, "w");
+    if (!f) return;
+    fputs("seq\tcaller\ta0\tadvance\ta2\ta3\tx\ty\testado\tsubestado\ttabela\tfonte\tbyte0\tmodo\n", f);
+    uint64_t first = g_texto_ring_total > TEXTO_RING_MAX
+                   ? g_texto_ring_total - TEXTO_RING_MAX : 0u;
+    for (uint64_t seq = first; seq < g_texto_ring_total; seq++) {
+        const texto_log_t* t = &g_texto_ring[seq % TEXTO_RING_MAX];
+        fprintf(f, "%llu\t%08X\t%08X\t%u\t%u\t%u\t%d\t%d\t%d\t%d\t%08X\t%08X\t%02X\t%02X\n",
+                (unsigned long long)seq, t->caller, t->a0, t->a1, t->a2,
+                t->a3, t->x, t->y, t->estado, t->subestado, t->tabela,
+                t->fonte, t->primeiro_byte, t->modo);
+    }
+    fclose(f);
 }
 
 void hle_texto_report(const char* prefixo) {
@@ -595,6 +670,27 @@ void hle_texto_report(const char* prefixo) {
             printf("tabela CI8 exportada     : %s (64 KiB)\n", nome);
         }
     }
+    /* Replays headless nao possuem uma tecla F5. Se a mesma sonda opt-in foi
+     * ativada, publique o anel ao encerrar para que o roteiro automatizado
+     * alcance menus sem depender de uma captura manual. */
+    {
+        const char* ring = getenv("WPJ2_F5_GLIFOS");
+        if (ring && *ring && *ring != '0' && prefixo && *prefixo)
+            hle_texto_capture(prefixo, 0u);
+    }
+    {
+        const char* dump = getenv("WPJ2_DUMP_RDRAM_FINAL");
+        if (dump && *dump && *dump != '0' && prefixo && *prefixo && g_rdram) {
+            char path[MAX_PATH + 80];
+            snprintf(path, sizeof(path), "%srdram_final.bin", prefixo);
+            FILE* f = fopen(path, "wb");
+            if (f) {
+                for (uint32_t i = 0; i < 0x00800000u; i++)
+                    fputc(g_rdram[i ^ 3u], f);
+                fclose(f);
+            }
+        }
+    }
 }
 
 /* Definidos mais abaixo, junto da entrega de eventos; declarados aqui porque as
@@ -608,6 +704,7 @@ static uint32_t rd32(uint8_t* rdram, uint32_t addr);
 static void video_present_pos_retrace(uint8_t* rdram) {
     if (!rsp_tasks_tipo(1)) return;
     uint32_t origin = *(uint32_t*)(rdram + (0xA4400004u - 0x80000000u)) & 0x1FFFFFFFu;
+    perf_timeline_mark("vi_origin", origin, 0u);
     uint32_t largura = *(uint32_t*)(rdram + (0xA4400008u - 0x80000000u)) & 0xFFFu;
     uint32_t formato = *(uint32_t*)(rdram + (0xA4400000u - 0x80000000u)) & 3u;
     uint32_t vstart = *(uint32_t*)(rdram + (0xA4400028u - 0x80000000u));
@@ -750,6 +847,26 @@ static void copy_cart_logical(uint8_t* rdram, uint32_t target, uint32_t source,
         rdram[(target + i) ^ 3u] = cart[(source + i) ^ 3u];
 }
 
+/* Copia entre duas regioes da RDRAM preservando a ordem de bytes MIPS mesmo
+ * quando os alinhamentos modulo 4 diferem. Isso e necessario para a arena
+ * PT-BR acima dos 4 MB: SysMem_DmaCopy do jogo deliberadamente rejeita
+ * ponteiros >= 0x80400000 porque o hardware original anuncia apenas 4 MB,
+ * mas o runtime hospeda 8 MB e reserva a metade superior para textos longos. */
+static void copy_rdram_logical(uint8_t* rdram, uint32_t target,
+                               uint32_t source, uint32_t size) {
+    if (((target ^ source) & 3u) == 0) {
+        memmove(rdram + target, rdram + source, size);
+        return;
+    }
+    if (target < source) {
+        for (uint32_t i = 0; i < size; i++)
+            rdram[(target + i) ^ 3u] = rdram[(source + i) ^ 3u];
+    } else {
+        for (uint32_t i = size; i-- > 0; )
+            rdram[(target + i) ^ 3u] = rdram[(source + i) ^ 3u];
+    }
+}
+
 /* A janela da ROM e a RDRAM usam o mesmo armazenamento word-swapped, mas um
  * memcpy entre elas so preserva os bytes MIPS quando origem e destino possuem
  * o mesmo alinhamento modulo 4. Isso nao e garantido pelo PI: o callback DMA
@@ -797,13 +914,68 @@ static void copy_pi_logical(uint8_t* rdram, uint32_t dram, uint32_t cart_off,
  * comprovadamente existe e ainda nao foi consumido. */
 void func_800BF0B4__replaced(uint8_t* rdram, recomp_context* ctx);
 void func_800BF0B4(uint8_t* rdram, recomp_context* ctx) {
-    uint32_t destino = (uint32_t)ctx->r6;
     func_800BF0B4__replaced(rdram, ctx);
+    /* A rotina pode bloquear esperando a PI. Nesse caso o dispatcher abandona
+     * a pilha C e volta depois por esta mesma wrapper, portanto nenhum local
+     * capturado antes de __replaced sobrevive de forma confiavel. Os tres
+     * argumentos originais continuam na area de argumentos do chamador: o
+     * prologo de Spi_DecompressAsset os salvou em child_sp+28/2C/30, que apos
+     * o epilogo corresponde a sp+0/4/8. */
+#ifdef RECOMP_STATEFUL
+    if (wpj2_cont_yielding_current()) return;
+#endif
+    uint32_t arquivo = rd32(rdram, (uint32_t)ctx->r29 + 0x00u);
+    uint32_t tamanho = rd32(rdram, (uint32_t)ctx->r29 + 0x04u);
+    uint32_t destino = rd32(rdram, (uint32_t)ctx->r29 + 0x08u);
+    {
+        uint8_t* cart = rdram + CART_WINDOW_OFFSET;
+        uint32_t descomprimido =
+            ((uint32_t)cart[(arquivo + 4u) ^ 3u] << 24u) |
+            ((uint32_t)cart[(arquivo + 5u) ^ 3u] << 16u) |
+            ((uint32_t)cart[(arquivo + 6u) ^ 3u] << 8u) |
+            (uint32_t)cart[(arquivo + 7u) ^ 3u];
+        if (arquivo <= 0x04000000u - 8u && descomprimido &&
+            (destino & 0x1FFFFFFFu) < 0x00400000u &&
+            descomprimido <= 0x00400000u - (destino & 0x1FFFFFFFu))
+            legendas_substituir_bloco_estatico(rdram, destino, descomprimido);
+    }
     if (getenv("WPJ2_TRACAR_SPI")) {
         static unsigned n;
-        if (n++ < 24u) {
-            printf("[spi] descomprimiu para 0x%08X\n", destino);
+        if (n++ < 256u) {
+            printf("[spi] arquivo=0x%08X tamanho=0x%X destino=0x%08X\n",
+                   arquivo, tamanho, destino);
             fflush(stdout);
+        }
+    }
+    /* Comparacao opt-in entre o recurso japones e o recurso alterado pelo
+     * patch do Ryu. O cabecalho SPI contem o tamanho descomprimido em big
+     * endian; exportamos a saida nativa, nao uma captura do framebuffer. */
+    if (getenv("WPJ2_DUMP_SPI") && arquivo == 0x0068E100u) {
+        static int exportado;
+        if (!exportado) {
+            exportado = 1;
+            uint8_t* cart = rdram + CART_WINDOW_OFFSET;
+            uint32_t descomprimido =
+                ((uint32_t)cart[(arquivo + 4u) ^ 3u] << 24u) |
+                ((uint32_t)cart[(arquivo + 5u) ^ 3u] << 16u) |
+                ((uint32_t)cart[(arquivo + 6u) ^ 3u] << 8u) |
+                (uint32_t)cart[(arquivo + 7u) ^ 3u];
+            uint32_t phys = destino & 0x1FFFFFFFu;
+            if (descomprimido && phys + descomprimido <= 0x00800000u) {
+                char path[MAX_PATH + 80];
+                const char* out = getenv("WPJ2_OUT");
+                snprintf(path, sizeof(path), "%sspi_0068E100.bin",
+                         out && *out ? out : "temp\\");
+                FILE* f = fopen(path, "wb");
+                if (f) {
+                    for (uint32_t i = 0; i < descomprimido; i++)
+                        fputc(rdram[(phys + i) ^ 3u], f);
+                    fclose(f);
+                    printf("[spi] recurso 0068E100 exportado: %s (%u bytes)\n",
+                           path, descomprimido);
+                    fflush(stdout);
+                }
+            }
         }
     }
     if (getenv("WPJ2_ACENTOS_LEGADO") &&
@@ -817,10 +989,26 @@ void func_800BD218(uint8_t* rdram, recomp_context* ctx) {
     uint32_t target = (uint32_t)ctx->r5;
     uint32_t size = (uint32_t)ctx->r6;
     uint32_t target_phys = target & 0x1FFFFFFFu;
+    uint32_t source_phys = source & 0x1FFFFFFFu;
+
+    /* A fila de dialogos aceita o ponteiro realocado, mas ao ativar a mensagem
+     * o motor passa por SysMem_DmaCopy para copiar 0x60 bytes ao buffer vivo.
+     * A rotina original recusa a metade superior da RDRAM e deixa nela a fala
+     * anterior, parecendo uma repeticao de legenda. A arena e uma extensao do
+     * runtime, portanto a copia dela tambem pertence a esta camada. */
+    if (source >= 0x80000000u && source_phys >= 0x00400000u &&
+        source_phys < 0x00700000u && size != 0 &&
+        size <= 0x00800000u - source_phys &&
+        target_phys < 0x00800000u && size <= 0x00800000u - target_phys) {
+        copy_rdram_logical(rdram, target_phys, source_phys, size);
+        ctx->r2 = 0;
+        return;
+    }
 
     if (source < 0x04000000u && size != 0 && size <= 0x04000000u - source &&
         target_phys < 0x00800000u && size <= 0x00800000u - target_phys) {
         copy_cart_logical(rdram, target_phys, source, size);
+        legendas_substituir_bloco_estatico(rdram, target, size);
         /* Recompor DEPOIS de cada copia de recurso.
          *
          * Medicao que motivou isto: a marca que gravamos na fonte nao
@@ -916,6 +1104,8 @@ void func_800CB090(uint8_t* rdram, recomp_context* ctx) {
 
     uint32_t cart_off = phys_dev - 0x10000000u;
     copy_pi_logical(rdram, phys_dram, cart_off, size, dir);
+    if (dir == 0)
+        legendas_substituir_bloco_estatico(rdram, dram, size);
 
     g_pi_transfers++;
     g_pi_bytes += size;
@@ -970,6 +1160,8 @@ void func_800D5060(uint8_t* rdram, recomp_context* ctx) {
     uint32_t phys_dram = dram & 0x1FFFFFFFu;
     uint32_t cart_off = phys_dev - 0x10000000u;
     copy_pi_logical(rdram, phys_dram, cart_off, size, dir);
+    if (dir == 0)
+        legendas_substituir_bloco_estatico(rdram, dram, size);
 
     g_pi_transfers++;
     g_pi_bytes += size;
@@ -1028,7 +1220,7 @@ static double g_poll_deadline;
 void hle_set_retrace(double hz) {
     if (hz <= 0.5 || hz >= 2000.0) return;
     g_retrace_normal_hz = hz;
-    g_retrace_hz = hz;
+    g_retrace_hz = hz * (g_fast_forward ? 8.0 : 1.0);
     if (g_retrace_hz > 1000.0) g_retrace_hz = 1000.0;
 }
 
@@ -1079,6 +1271,10 @@ static int g_in_poll = 0;
 static int g_table_dumped = 0;
 static uint64_t g_retraces = 0;
 static uint64_t g_polls = 0;
+static int g_vi_perf = -1;
+static uint64_t g_vi_late_5, g_vi_late_10, g_vi_late_16, g_vi_late_33;
+static double g_vi_late_max_ms;
+static uint32_t g_vi_late_max_func;
 static uint64_t g_force_state2_after = 0;
 static int g_force_state2_done = 0;
 static uint64_t g_force_active_after = 0;
@@ -1103,6 +1299,53 @@ static int g_rsp_dp_pending = 0;
  * reproduzindo a cadencia historica das capturas de 3D. A emulacao normal
  * continua preemptando apenas quando um retrace/evento foi entregue. */
 static int g_preempt_every_poll = 0;
+
+/* Overrides nativos que entram novamente no corpo recompilado. A pilha do
+ * wrapper C contem argumentos/temporarios que ainda nao fazem parte do
+ * snapshot. Uma preempcao assincrona dentro do __replaced abandona essa pilha
+ * e reexecuta o wrapper com registradores do ponto mais profundo, corrompendo
+ * formatadores e ate a lista do heap. Pontos bloqueantes explicitos continuam
+ * podendo ceder; aqui adiamos somente a interrupcao cooperativa de RECOMP_POLL
+ * ate sair da fronteira nativa. */
+static int stateful_native_boundary_active(void) {
+#ifdef RECOMP_STATEFUL
+    static const uint32_t wrappers[] = {
+        0x80001F54u, 0x80002F20u, 0x800045ACu, 0x80004654u,
+        0x8000BDDCu, 0x8000C584u, 0x800319B0u, 0x80090784u,
+        0x80090E58u, 0x80094230u, 0x80096B38u, 0x80096D40u,
+        0x80098820u, 0x80098D24u, 0x8009908Cu, 0x80099450u,
+        0x800BC6ECu, 0x800BD218u, 0x800BF0B4u, 0x800C0A40u,
+        0x800C143Cu, 0x800C4AA0u, 0x800C4C40u, 0x800C7A40u,
+        0x800CCC60u
+    };
+    wpj2_continuation* cont = wpj2_cont_current();
+    if (!cont) return 0;
+    for (uint32_t i = 0; i < cont->depth; i++)
+        for (size_t j = 0; j < sizeof(wrappers) / sizeof(wrappers[0]); j++)
+            if (cont->frames[i].function_vram == wrappers[j]) return 1;
+#endif
+    return 0;
+}
+
+/* Uma interrupcao da libultra nao troca para uma thread de prioridade menor:
+ * o dispatcher continuaria escolhendo a corrente. No modelo serializavel,
+ * ceder mesmo assim desmonta e reconstrói dez frames da thread de audio a
+ * cada VI. Alem do custo enorme, isso impedia a AList de terminar e deixava a
+ * ENIX aparentemente congelada. Preemptamos somente quando o evento tornou
+ * pronta uma thread realmente mais prioritaria. */
+static int stateful_higher_priority_ready(uint8_t* rdram) {
+#ifdef RECOMP_STATEFUL
+    uint32_t current = sched_current();
+    uint32_t head = rd32(rdram, ADDR_RUN_QUEUE);
+    if (!current || !head) return 0;
+    int32_t current_pri = (int32_t)rd32(rdram, current + TH_PRIORITY);
+    int32_t ready_pri = (int32_t)rd32(rdram, head + TH_PRIORITY);
+    return ready_pri >= 0 && ready_pri > current_pri;
+#else
+    (void)rdram;
+    return 1;
+#endif
+}
 static int g_events_idle_only = -1;
 static int g_high_res_timer = 0;
 /* O ucode recompilado nao materializa `mtc0 Compare`. Sem esta ponte o
@@ -1112,6 +1355,39 @@ static int g_high_res_timer = 0;
 static int g_counter_compare_mode = -1;
 static int g_counter_compare_armed = 0;
 static uint32_t g_counter_compare = 0;
+
+void hle_prepare_scheduler_yield(void) {
+    /* O dispatcher stateful sai de recomp_poll por longjmp. Sem esta limpeza,
+     * o guard de reentrancia ficaria armado para sempre depois do primeiro
+     * interrupt e nenhum poll posterior entregaria eventos. */
+    g_in_poll = 0;
+}
+
+void hle_state_capture(wpj2_hle_state_image* image) {
+    if (!image) return;
+    memset(image, 0, sizeof(*image));
+    image->retraces = g_retraces;
+    image->polls = g_polls;
+    image->event_mask = g_event_mask;
+    image->counter_compare = g_counter_compare;
+    image->rsp_dp_pending = g_rsp_dp_pending;
+    image->counter_compare_armed = g_counter_compare_armed;
+}
+
+void hle_state_restore(const wpj2_hle_state_image* image) {
+    if (!image) return;
+    g_retraces = image->retraces;
+    g_polls = image->polls;
+    g_event_mask = image->event_mask;
+    g_counter_compare = image->counter_compare;
+    g_rsp_dp_pending = image->rsp_dp_pending;
+    g_counter_compare_armed = image->counter_compare_armed;
+    g_in_poll = 0;
+    /* QPC absoluto nao e serializavel. O proximo evento inaugura um prazo
+     * novo a partir do relogio atual, sem rajada para compensar tempo parado. */
+    g_poll_freq.QuadPart = 0;
+    g_poll_deadline = 0.0;
+}
 
 static int hle_counter_compare_mode(void) {
     if (g_counter_compare_mode < 0) {
@@ -1142,6 +1418,13 @@ void hle_clock_shutdown(void) {
         timeEndPeriod(1);
         g_high_res_timer = 0;
     }
+}
+void hle_clock_resync(void) {
+    if (!g_poll_freq.QuadPart) return;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    g_poll_deadline = (double)now.QuadPart +
+        (double)g_poll_freq.QuadPart * RETRACE_PERIOD_S;
 }
 
 uint64_t hle_retraces(void) { return g_retraces; }
@@ -1332,13 +1615,20 @@ static uint32_t g_msg_enviadas = 0, g_msg_log_n = 0;
 void func_800C4AA0__replaced(uint8_t* rdram, recomp_context* ctx);
 
 void func_800C4AA0(uint8_t* rdram, recomp_context* ctx) {
-    const uint32_t mq = (uint32_t)ctx->r4;
-    const uint32_t mensagem = (uint32_t)ctx->r5;
+    func_800C4AA0__replaced(rdram, ctx);
+#ifdef RECOMP_STATEFUL
+    if (wpj2_cont_yielding_current()) return;
+#endif
+    /* osSendMesg pode ceder quando a fila esta cheia. Reconstituir os
+     * argumentos na area de saida do chamador evita reutilizar registradores
+     * do ponto profundo em que a continuation foi interrompida. */
+    const uint32_t mq = rd32(rdram, (uint32_t)ctx->r29 + 0x00u);
+    const uint32_t mensagem = rd32(rdram, (uint32_t)ctx->r29 + 0x04u);
     const uint32_t antes = mq ? rd32(rdram, mq + 0x08) : 0;
     if (mq == FILA_INICIAL && g_msg_log_n < MSG_LOG_MAX) {
-        g_msg_log[g_msg_log_n++] = (msg_log_t){ trace_last_func(), mensagem, antes, antes };
+        g_msg_log[g_msg_log_n++] =
+            (msg_log_t){ trace_last_func(), mensagem, antes, antes };
     }
-    func_800C4AA0__replaced(rdram, ctx);
     if (mq == FILA_INICIAL) {
         g_msg_enviadas++;
         if (g_msg_log_n) g_msg_log[g_msg_log_n - 1].depois = rd32(rdram, mq + 0x08);
@@ -1423,11 +1713,17 @@ void func_80004654(uint8_t* rdram, recomp_context* ctx) {
 void func_800C4C40__replaced(uint8_t* rdram, recomp_context* ctx);
 static unsigned g_receives = 0;
 void func_800C4C40(uint8_t* rdram, recomp_context* ctx) {
-    uint32_t fila = (uint32_t)ctx->r4;
-    uint32_t saida = (uint32_t)ctx->r5;
-    uint32_t bloqueia = (uint32_t)ctx->r6;
-    uint32_t caller = (uint32_t)ctx->r31;
     func_800C4C40__replaced(rdram, ctx);
+#ifdef RECOMP_STATEFUL
+    if (wpj2_cont_yielding_current()) return;
+#endif
+    /* Mesmo contrato de osSendMesg acima: osRecvMesg e justamente um ponto
+     * bloqueante. Seu frame tem 0x38 bytes e salva a0/a1/a2 em
+     * child_sp+38/3C/40, isto e, sp+0/4/8 depois do retorno. */
+    uint32_t fila = rd32(rdram, (uint32_t)ctx->r29 + 0x00u);
+    uint32_t saida = rd32(rdram, (uint32_t)ctx->r29 + 0x04u);
+    uint32_t bloqueia = rd32(rdram, (uint32_t)ctx->r29 + 0x08u);
+    uint32_t caller = (uint32_t)ctx->r31;
     if (fila == FILA_TRANSICAO) {
         static unsigned transicao_recebes = 0;
         if (transicao_recebes++ < 24) {
@@ -1461,6 +1757,7 @@ void func_80001F54__replaced(uint8_t* rdram, recomp_context* ctx);
 static unsigned g_gate_path_log = 0;
 
 static void gate_path_mark(const char* stage, uint8_t* rdram, recomp_context* ctx) {
+    if (!runtime_diagnostics_enabled()) return;
     if (g_gate_path_log++ < 48) {
         printf("[gate-path] %s pai=%08X r2=%08X flags=%04X pending=%04X active=%08X\n",
                stage, trace_last_func(), (uint32_t)ctx->r2,
@@ -1492,6 +1789,8 @@ void func_80098D24(uint8_t* rdram, recomp_context* ctx) {
     uint16_t raw_antes = rdram16(rdram, 0x00180DA8u);
 
     func_80098D24__replaced(rdram, ctx);
+
+    if (!runtime_diagnostics_enabled()) return;
 
     uint16_t pad_depois = rdram16(rdram, 0x00182558u);
     uint16_t raw_depois = rdram16(rdram, 0x00180DA8u);
@@ -1837,6 +2136,7 @@ static int deliver_rsp_task_done(uint8_t* rdram) {
  * n-esima leitura e sempre a n-esima leitura, enquanto "aos 21 segundos"
  * escorrega conforme a carga do host. */
 static uint64_t g_alvo_turbo = 0;
+static uint64_t g_alvo_turbo_retrace = 0;
 
 void hle_definir_alvo_turbo(uint64_t alvo) {
     g_alvo_turbo = alvo;
@@ -1846,7 +2146,35 @@ void hle_definir_alvo_turbo(uint64_t alvo) {
     }
 }
 
+void hle_definir_alvo_turbo_retrace(uint64_t alvo) {
+    g_alvo_turbo_retrace = alvo;
+    if (alvo) {
+        /* Diferente do antigo turbo sem limite, o replay v2 conserva uma
+         * cadencia de 8x. Entregar VI sem nenhum intervalo mantinha a thread
+         * de maior prioridade sempre pronta e podia acumular milhares de
+         * retraces antes de as threads de controle/RSP sequer nascerem. */
+        hle_set_fast_forward(1);
+        audio_set_fast_forward(1);
+        printf("[replay] turbo ate o retrace %llu\n",
+               (unsigned long long)alvo);
+        fflush(stdout);
+    }
+}
+
 int hle_turbo_ativo(void) {
+    if (g_alvo_turbo_retrace) {
+        /* v2 e acelerado pela taxa de retrace em hle_set_fast_forward, nao
+         * removendo completamente o portao. Retornar 1 aqui reintroduziria a
+         * rajada que deixa a inicializacao de baixa prioridade sem CPU. */
+        if (g_retraces < g_alvo_turbo_retrace) return 0;
+        printf("[replay] alvo alcancado no retrace %llu; velocidade normal\n",
+               (unsigned long long)g_retraces);
+        fflush(stdout);
+        g_alvo_turbo_retrace = 0;
+        hle_set_fast_forward(0);
+        audio_set_fast_forward(0);
+        return 0;
+    }
     if (!g_alvo_turbo) return 0;
     if (pif_polls_atuais() < g_alvo_turbo) return 1;
     printf("[replay] alvo alcancado na leitura %llu; velocidade normal\n",
@@ -1856,7 +2184,18 @@ int hle_turbo_ativo(void) {
     return 0;
 }
 
-int hle_deliver_events(uint8_t* rdram) {
+int hle_navigation_turbo_active(void) {
+    return g_fast_forward ||
+           (g_alvo_turbo_retrace && g_retraces < g_alvo_turbo_retrace) ||
+           (g_alvo_turbo && pif_polls_atuais() < g_alvo_turbo);
+}
+
+int hle_replay_turbo_active(void) {
+    return (g_alvo_turbo_retrace && g_retraces < g_alvo_turbo_retrace) ||
+           (g_alvo_turbo && pif_polls_atuais() < g_alvo_turbo);
+}
+
+static int hle_deliver_events_impl(uint8_t* rdram, int may_wait) {
     /* O retrace tem uma taxa: 60 Hz. Sem esse portao o laco ocioso do scheduler
        entrega interrupcoes o mais rapido que o host consegue, e o jogo roda
        centenas de vezes acelerado - o que nao e so feio, e falso: temporizacao
@@ -1871,6 +2210,10 @@ int hle_deliver_events(uint8_t* rdram) {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     double restante_ticks = g_poll_deadline - (double)now.QuadPart;
+    if (g_vi_perf < 0) {
+        const char* value = getenv("WPJ2_VI_PERF");
+        g_vi_perf = value && atoi(value) != 0;
+    }
     /* SP/DP nao esperam o proximo retrace; vide deliver_rsp_task_done acima. */
     int rsp_woke = deliver_rsp_task_done(rdram);
     /* SI tambem nao espera, e pelo mesmo motivo.
@@ -1910,7 +2253,7 @@ int hle_deliver_events(uint8_t* rdram) {
          * mensagem e a proxima transferencia so pode comecar depois que esta
          * for consumida. O prazo absoluto continua intacto - nada aqui adianta
          * o relogio de quadros. */
-        if (rsp_woke) return rsp_woke;
+        if (rsp_woke) return HLE_DELIVERY_WAKE;
         /* Turbo da reproducao: enquanto nao chegamos ao ponto gravado, nao ha
          * por que dormir. O prazo absoluto continua sendo respeitado logo
          * abaixo, entao a ORDEM dos eventos nao muda - so a velocidade com que
@@ -1918,15 +2261,20 @@ int hle_deliver_events(uint8_t* rdram) {
          * de jogo em segundos para voltar a uma cena. */
         if (hle_turbo_ativo()) {
             g_poll_deadline = (double)now.QuadPart;
-            return rsp_woke;
+            return rsp_woke ? HLE_DELIVERY_WAKE : 0;
         }
+        /* Uma OSThread ainda está executando. O N64 não para a CPU entre dois
+         * retraces; apenas o dispatcher realmente ocioso pode dormir. A rota
+         * antiga bloqueava em todo RECOMP_POLL e roubava 4--15% da lógica nas
+         * cenas com mais callbacks, embora o contador VI continuasse em 60. */
+        if (!may_wait) return 0;
         /* A resolucao foi fixada em 1 ms no inicio. Dormir apenas o inteiro
          * estritamente anterior ao prazo evita uma espera extra de 15,6 ms e
          * deixa o ultimo milissegundo para o proximo poll cooperativo. */
         double restante_ms = restante_ticks * 1000.0 / (double)g_poll_freq.QuadPart;
         if (restante_ms > 1.5) Sleep((DWORD)restante_ms - 1u);
         else Sleep(0);
-        return rsp_woke;
+        return rsp_woke ? HLE_DELIVERY_WAKE : 0;
     }
     /* Preserve sempre o prazo absoluto. A versao anterior reiniciava o
      * relogio quando um quadro excedia dois VIs; cada pico eliminava VIs da
@@ -1934,6 +2282,37 @@ int hle_deliver_events(uint8_t* rdram) {
      * no maximo, alguns polls cooperativos sem sono ate o prazo ser alcancado;
      * cada um ainda entrega um unico VI, preservando a ordem das mensagens. */
     g_poll_deadline += (double)g_poll_freq.QuadPart * RETRACE_PERIOD_S;
+    perf_timeline_mark("vi", (uint32_t)(g_retraces + 1u), 0u);
+
+    if (g_vi_perf && restante_ticks < 0.0) {
+        double late_ms = -restante_ticks * 1000.0 / (double)g_poll_freq.QuadPart;
+        if (late_ms > 5.0) g_vi_late_5++;
+        if (late_ms > 10.0) g_vi_late_10++;
+        if (late_ms > 16.0) g_vi_late_16++;
+        if (late_ms > 33.0) g_vi_late_33++;
+        if (late_ms > g_vi_late_max_ms) {
+            g_vi_late_max_ms = late_ms;
+            g_vi_late_max_func = trace_last_func();
+        }
+        if (((g_retraces + 1u) % 600u) == 0u) {
+            printf("[vi-perf] retraces=%llu atraso>5=%llu >10=%llu >16=%llu >33=%llu max=%.3fms func=%08X\n",
+                   (unsigned long long)(g_retraces + 1u),
+                   (unsigned long long)g_vi_late_5,
+                   (unsigned long long)g_vi_late_10,
+                   (unsigned long long)g_vi_late_16,
+                   (unsigned long long)g_vi_late_33,
+                   g_vi_late_max_ms, g_vi_late_max_func);
+            fflush(stdout);
+        }
+    }
+
+    /* A apresentação pertence ao pulso de VI, não ao chamador. O scheduler
+       também entrega VI quando nenhuma OSThread está pronta; deixá-la apenas
+       em recomp_poll fazia esse caminho avançar o jogo sem atualizar a janela
+       (efeito de slide show). Centralizar aqui garante uma apresentação por
+       retrace em todos os caminhos e elimina as apresentações disparadas por
+       simples conclusões de RSP/SI. */
+    video_present_pos_retrace(rdram);
 
     if (!g_table_dumped) {
         g_table_dumped = 1;
@@ -2024,7 +2403,15 @@ int hle_deliver_events(uint8_t* rdram) {
      * deliver_rsp_task_done(), quando existe uma tarefa real terminada. */
     g_retraces++;
     status_note(rdram);
-    return 1;
+    return HLE_DELIVERY_VI | (rsp_woke ? HLE_DELIVERY_WAKE : 0);
+}
+
+int hle_deliver_events(uint8_t* rdram) {
+    return hle_deliver_events_impl(rdram, 1);
+}
+
+int hle_poll_events(uint8_t* rdram) {
+    return hle_deliver_events_impl(rdram, 0);
 }
 
 void recomp_poll(void) {
@@ -2133,6 +2520,7 @@ void recomp_poll(void) {
     if (rd32(rdram, ADDR_RUNNING_THREAD) == 0) return;
 
     g_in_poll = 1;
+    int native_boundary = stateful_native_boundary_active();
     if (g_events_idle_only < 0) {
         const char* e = getenv("WPJ2_EVENTS_IDLE_ONLY");
         g_events_idle_only = e && *e && *e != '0';
@@ -2144,7 +2532,8 @@ void recomp_poll(void) {
        o VI cairá. */
     if (g_events_idle_only) {
         int rsp_woke = deliver_rsp_task_done(rdram);
-        if (rsp_woke) sched_preempt(rdram);
+        if (rsp_woke && !native_boundary &&
+            stateful_higher_priority_ready(rdram)) sched_preempt(rdram);
         g_in_poll = 0;
         return;
     }
@@ -2153,16 +2542,18 @@ void recomp_poll(void) {
      * por 1 ms fragmentava a thread do jogo milhares de vezes entre dois
      * quadros; alem de custar desempenho, isso quebra a cadencia das rotinas
      * que o titulo espera receber a cada VI. */
-    int retrace = hle_deliver_events(rdram);
-    if (retrace || g_preempt_every_poll) {
+    int delivered = hle_poll_events(rdram);
+    int retrace = (delivered & HLE_DELIVERY_VI) != 0;
+    if (delivered || g_preempt_every_poll) {
         /* O VI comeca a varrer o framebuffer ja escolhido no retrace anterior.
          * Copia-lo antes de acordar as threads da ROM evita que varias listas
          * SP/DP submetidas no mesmo intervalo sejam vistas como uma composicao
          * impossivel (cidade 2D sobre o corredor 3D). A nova origem sera
          * preparada pelo handler e aparecera no retrace seguinte, como no
          * double-buffering do N64. */
-        if (retrace) video_present_pos_retrace(rdram);
-        sched_preempt(rdram);
+        if (!native_boundary &&
+            (g_preempt_every_poll || stateful_higher_priority_ready(rdram)))
+            sched_preempt(rdram);
     }
     g_in_poll = 0;
 }

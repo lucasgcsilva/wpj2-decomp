@@ -3,6 +3,14 @@
 
 #include <stdint.h>
 
+/* Algumas rotinas do primeiro levantamento ainda contêm printf inseridos no
+   C recompilado. O gerador preserva essas linhas; a build normal deve removê-
+   las em compilação, sem esconder mensagens do runtime. Uma build dirigida
+   pode defini-las novamente com WPJ2_GENERATED_DEBUG. */
+#if defined(WPJ2_GENERATED_CODE) && !defined(WPJ2_GENERATED_DEBUG)
+#define printf(...) ((int)0)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

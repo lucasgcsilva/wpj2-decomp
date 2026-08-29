@@ -16,6 +16,12 @@
 #define PRESENT_H 480u
 
 static HWND g_video_window = NULL;
+static HWND g_state_notice = NULL;
+static HFONT g_state_notice_font = NULL;
+static HBRUSH g_state_notice_brush = NULL;
+static ULONGLONG g_state_notice_until = 0;
+static COLORREF g_state_notice_color = RGB(120, 255, 140);
+static char g_state_notice_text[64];
 static uint32_t g_pixels[VIDEO_W * VIDEO_H];
 static uint32_t g_pixels_2x[PRESENT_W * PRESENT_H];
 static BITMAPINFO g_bmi;
@@ -33,13 +39,49 @@ static int g_vi_gamma = -1;
 static uint32_t g_pixels_filtrados[VIDEO_W * VIDEO_H];
 static int g_vi_filter_2d = -1;
 static char g_video_title[256];
+static int g_f11_down = 0;
 
-/* Bookmark reproduzivel. Restaurar somente RDRAM por baixo das fibers antigas
- * era intrinsecamente inconsistente: pilhas C, filas, TMEM e audio permaneciam
- * no futuro e o jogo travava depois de um ou dois F4. F2 agora grava a entrada
- * indexada pelas leituras do PIF; F4 pede ao TESTAR.bat uma execucao nova, que
- * refaz o caminho em turbo e chega ao mesmo ponto com todas as threads validas. */
+static void video_position_state_notice(void) {
+    if (!g_video_window || !g_state_notice) return;
+    RECT client;
+    GetClientRect(g_video_window, &client);
+    int width = client.right > 420 ? 230 : client.right - 24;
+    if (width < 120) width = 120;
+    POINT position = { 12, client.bottom - 42 };
+    ClientToScreen(g_video_window, &position);
+    SetWindowPos(g_state_notice, HWND_TOP, position.x, position.y,
+                 width, 28, SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+}
+
+static LRESULT CALLBACK video_notice_wndproc(HWND hwnd, UINT msg,
+                                              WPARAM wp, LPARAM lp) {
+    (void)wp; (void)lp;
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT rect;
+        GetClientRect(hwnd, &rect);
+        FillRect(dc, &rect, g_state_notice_brush ? g_state_notice_brush :
+                 (HBRUSH)GetStockObject(BLACK_BRUSH));
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, g_state_notice_color);
+        if (g_state_notice_font) SelectObject(dc, g_state_notice_font);
+        rect.left += 10;
+        DrawTextA(dc, g_state_notice_text, -1, &rect,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+/* Compatibilidade do build legado sem RECOMP_STATEFUL. No build principal,
+ * Os slots 1..9 sao pedidos de snapshot consumidos pelo scheduler em limite seguro. */
 static int g_bookmark_restart = 0;
+#ifdef RECOMP_STATEFUL
+static int g_state_save_request = 0;
+static int g_state_load_request = 0;
+#endif
 
 static int video_bookmark_path(char* path, size_t capacity,
                                const char* filename) {
@@ -55,13 +97,28 @@ static int video_bookmark_path(char* path, size_t capacity,
 
 static void video_update_title(void) {
     if (!g_video_window) return;
-    if (hle_fast_forward_active()) {
+    if (hle_replay_turbo_active()) {
+        char title[sizeof(g_video_title) + 32];
+        snprintf(title, sizeof(title), "%s [retornando ao F2]", g_video_title);
+        SetWindowTextA(g_video_window, title);
+    } else if (hle_navigation_turbo_active()) {
         char title[sizeof(g_video_title) + 16];
         snprintf(title, sizeof(title), "%s [8x]", g_video_title);
         SetWindowTextA(g_video_window, title);
     } else {
         SetWindowTextA(g_video_window, g_video_title);
     }
+}
+
+static void video_set_f11(int enabled) {
+    enabled = enabled != 0;
+    if (enabled == g_f11_down) return;
+    g_f11_down = enabled;
+    hle_set_fast_forward(enabled);
+    audio_set_fast_forward(enabled);
+    video_update_title();
+    printf("[controle] F11: velocidade %s\n", enabled ? "8x" : "normal");
+    fflush(stdout);
 }
 
 /* O VI do jogo liga OS_VI_DITHER_FILTER_ON, mas o filtro real depende dos
@@ -272,8 +329,42 @@ static void video_capture_f5(void) {
                 (unsigned long long)rsp_last_gfx_z_accepted(),
                 (unsigned long long)rsp_last_gfx_z_rejected()); fputc(10, dados);
         fprintf(dados, "prim=%08X othermode_l=%08X", rsp_prim_color(), rsp_othermode_l()); fputc(10, dados);
+        /* Posição do cursor/Bird. O wonder-source identifica três ponteiros
+         * para bancos de quatro SpriteObj em 801A8C18/24/30. Em vez de tentar
+         * adivinhar qual slot é Bird, o F5 grava todos os ativos; duas capturas
+         * em posições distintas permitem reconhecê-lo pelo campo CC/D0 que
+         * muda. SpriteObj: flags=C0, x=CC, y=D0, z=D4, recurso=C8. */
+        fprintf(dados, "controle_raw=%04X edge=%04X repeat=%04X stick_bits=%08X,%08X",
+                *(uint16_t*)(g_last_rdram + (0x001560F4u ^ 2u)),
+                *(uint16_t*)(g_last_rdram + (0x001560F6u ^ 2u)),
+                *(uint16_t*)(g_last_rdram + (0x001560F8u ^ 2u)),
+                *(uint32_t*)(g_last_rdram + 0x00156100u),
+                *(uint32_t*)(g_last_rdram + 0x00156104u)); fputc(10, dados);
+        static const uint32_t bancos[] = { 0x001A8C18u, 0x001A8C24u, 0x001A8C30u };
+        for (unsigned banco = 0; banco < 3u; banco++) {
+            uint32_t virtual_base = *(uint32_t*)(g_last_rdram + bancos[banco]);
+            uint32_t base = virtual_base & 0x1FFFFFFFu;
+            fprintf(dados, "sprite_banco_%u_ponteiro=%08X", banco, virtual_base); fputc(10, dados);
+            if (virtual_base < 0x80000000u || base >= 0x00800000u ||
+                base + 4u * 0x160u > 0x00800000u) continue;
+            for (unsigned slot = 0; slot < 4u; slot++) {
+                uint32_t obj = base + slot * 0x160u;
+                uint32_t flags = *(uint32_t*)(g_last_rdram + obj + 0xC0u);
+                uint32_t resource = *(uint32_t*)(g_last_rdram + obj + 0xC8u);
+                float x, y, z, rz;
+                memcpy(&x, g_last_rdram + obj + 0xCCu, sizeof(x));
+                memcpy(&y, g_last_rdram + obj + 0xD0u, sizeof(y));
+                memcpy(&z, g_last_rdram + obj + 0xD4u, sizeof(z));
+                memcpy(&rz, g_last_rdram + obj + 0xF0u, sizeof(rz));
+                fprintf(dados,
+                        "sprite_%u_%u=%08X flags=%08X recurso=%08X x=%.6f y=%.6f z=%.6f rotz=%.6f",
+                        banco, slot, 0x80000000u | obj, flags, resource,
+                        x, y, z, rz); fputc(10, dados);
+            }
+        }
         fclose(dados);
     }
+    hle_texto_capture(pasta, id);
     legendas_capturar_rdram(g_last_rdram, pasta, id);
     printf("[captura] F5 -> %s e %s; proxima AList de audio armada", bmp, info); fputc(10, stdout);
     fflush(stdout);
@@ -304,8 +395,14 @@ static void video_capture_history_f6(void) {
     fflush(stdout);
 }
 
-static void video_checkpoint_f2(void) {
+static void video_state_save_slot(int slot) {
     if (!g_last_rdram) return;
+#ifdef RECOMP_STATEFUL
+    g_state_save_request = slot;
+    printf("[savestate] slot %d: captura solicitada no proximo limite seguro\n", slot);
+    fflush(stdout);
+    return;
+#endif
     char replay[MAX_PATH], imagem[MAX_PATH], info[MAX_PATH];
     if (!video_bookmark_path(replay, sizeof(replay), "quick.replay") ||
         !video_bookmark_path(imagem, sizeof(imagem), "quick.bmp") ||
@@ -317,7 +414,7 @@ static void video_checkpoint_f2(void) {
     if (f) {
         uint16_t estado = *(uint16_t*)(g_last_rdram + (0x001A7234u ^ 2u));
         uint16_t subestado = *(uint16_t*)(g_last_rdram + (0x001A723Cu ^ 2u));
-        fprintf(f, "formato=WPJ2_BOOKMARK_1\n");
+        fprintf(f, "formato=WPJ2_BOOKMARK_2\n");
         fprintf(f, "retrace=%llu\n", (unsigned long long)hle_retraces());
         fprintf(f, "poll_controle=%llu\n",
                 (unsigned long long)pif_polls_atuais());
@@ -331,7 +428,13 @@ static void video_checkpoint_f2(void) {
     fflush(stdout);
 }
 
-static void video_checkpoint_f4(void) {
+static void video_state_load_slot(int slot) {
+#ifdef RECOMP_STATEFUL
+    g_state_load_request = slot;
+    printf("[savestate] slot %d: restauracao solicitada no proximo limite seguro\n", slot);
+    fflush(stdout);
+    return;
+#endif
     char path[MAX_PATH];
     if (!video_bookmark_path(path, sizeof(path), "quick.replay")) return;
     DWORD attr = GetFileAttributesA(path);
@@ -413,6 +516,9 @@ static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         video_keep_4_3(hwnd, wp, (RECT*)lp);
         return TRUE;
     }
+    if (msg == WM_SIZE || msg == WM_MOVE) {
+        video_position_state_notice();
+    }
     if (msg == WM_GETMINMAXINFO) {
         MINMAXINFO* limits = (MINMAXINFO*)lp;
         RECT minimum = {0, 0, 320, 240};
@@ -472,14 +578,16 @@ static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             pif_update_stick_from_keys(state_up, state_down, state_left, state_right);
 
             if (pressionados != antes) pif_set_buttons(pressionados);
-            printf("[controle] botoes=0x%04X analogico=%s%s%s%s%s\n",
-                   pressionados,
-                   (!state_up && !state_down && !state_left && !state_right) ? "CENTRO" : "",
-                   state_up ? "CIMA " : "",
-                   state_down ? "BAIXO " : "",
-                   state_left ? "ESQ " : "",
-                   state_right ? "DIR " : "");
-            fflush(stdout);
+            if (runtime_diagnostics_enabled()) {
+                printf("[controle] botoes=0x%04X analogico=%s%s%s%s%s\n",
+                       pressionados,
+                       (!state_up && !state_down && !state_left && !state_right) ? "CENTRO" : "",
+                       state_up ? "CIMA " : "",
+                       state_down ? "BAIXO " : "",
+                       state_left ? "ESQ " : "",
+                       state_right ? "DIR " : "");
+                fflush(stdout);
+            }
             return 0;
         }
     }
@@ -491,43 +599,66 @@ static LRESULT CALLBACK video_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         video_capture_history_f6();
         return 0;
     }
-    if (msg == WM_KEYDOWN && wp == VK_F2 && !(lp & (1L << 30))) {
-        video_checkpoint_f2();
-        return 0;
+    /* Nove estados independentes. A linha numerica e o teclado numerico usam
+       o mesmo slot; Shift distingue gravacao de restauracao. O teste de
+       repeticao impede uma tecla mantida de regravar o arquivo varias vezes. */
+    if (msg == WM_KEYDOWN && !(lp & (1L << 30))) {
+        int slot = 0;
+        if (wp >= '1' && wp <= '9') slot = (int)(wp - '0');
+        else if (wp >= VK_NUMPAD1 && wp <= VK_NUMPAD9)
+            slot = (int)(wp - VK_NUMPAD0);
+        if (slot && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            if (GetKeyState(VK_SHIFT) & 0x8000) video_state_save_slot(slot);
+            else video_state_load_slot(slot);
+            return 0;
+        }
     }
-    if (msg == WM_KEYDOWN && wp == VK_F4 && !(lp & (1L << 30))) {
-        video_checkpoint_f4();
-        return 0;
-    }
-    /* F10 fica reservado: elevar a cadencia parava fibers sem avancar a ROM.
-     * F2/F4 usa reinicio com reproducao deterministica. */
+    /* F10 fica reservado; avanco momentaneo usa F11. */
     if (msg == WM_KEYDOWN && wp == VK_F10 && !(lp & (1L << 30))) {
-        printf("[controle] F10: aceleracao indisponivel; use F2/F4\n");
+        printf("[controle] F10: aceleracao indisponivel; segure F11\n");
         fflush(stdout);
         return 0;
     }
     /* Avanco momentaneo: pressionar muda a cadencia emulada para 8x e tira o
        audio hospedado do caminho critico; soltar restaura ambos imediatamente. */
     if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && wp == VK_F11) {
-        int enabled = msg == WM_KEYDOWN;
-        hle_set_fast_forward(enabled);
-        audio_set_fast_forward(enabled);
-        video_update_title();
-        if (!(lp & (1L << 30)) || msg == WM_KEYUP) {
-            printf("[controle] F11: velocidade %s\n", enabled ? "8x" : "normal");
-            fflush(stdout);
-        }
+        video_set_f11(msg == WM_KEYDOWN);
         return 0;
     }
     return DefWindowProc(hwnd, msg, wp, lp);
 }
 
 void video_pump_messages(void) {
+    static int title_turbo = -1;
     if (!g_video_enabled || !g_video_window) return;
     MSG msg;
     while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
+    }
+    if (g_state_notice && g_state_notice_until &&
+        GetTickCount64() >= g_state_notice_until) {
+        ShowWindow(g_state_notice, SW_HIDE);
+        g_state_notice_until = 0;
+    }
+    /* Durante a troca 3D/2D o RT64 pode reconstruir a swapchain e o Win32 nem
+       sempre entrega WM_KEYUP à janela no mesmo instante. Consultar o estado
+       físico impede que o turbo fique preso depois de soltar F11. Fora de
+       foco, sempre volta à velocidade normal. */
+    {
+        int foreground = GetForegroundWindow() == g_video_window;
+        int pressed = foreground && (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+        video_set_f11(pressed);
+    }
+    /* O replay F4 liga/desliga o turbo sem passar pela tecla. Sincronize o
+       titulo quando ele alcanca o retrace (v2) ou poll (v1) gravado, sem
+       chamar SetWindowText em todo quadro. */
+    {
+        int turbo = hle_navigation_turbo_active() != 0;
+        if (turbo != title_turbo) {
+            title_turbo = turbo;
+            video_update_title();
+        }
     }
 }
 
@@ -538,6 +669,12 @@ int video_init(void) {
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.lpszClassName = "WPJ2RecompPreview";
     RegisterClassA(&wc); /* ja registrada em uma segunda execucao e normal */
+    WNDCLASSA notice_wc = {0};
+    notice_wc.lpfnWndProc = video_notice_wndproc;
+    notice_wc.hInstance = wc.hInstance;
+    notice_wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    notice_wc.lpszClassName = "WPJ2StateNotice";
+    RegisterClassA(&notice_wc);
 
     const char* titulo = getenv("WPJ2_WINDOW_TITLE");
     if (!titulo || !*titulo) titulo = "Wonder Project J2 - prototipo recompilado";
@@ -556,6 +693,17 @@ int video_init(void) {
         printf("[video] nao foi possivel criar a janela (%lu)\n", GetLastError());
         return 0;
     }
+    g_state_notice_brush = CreateSolidBrush(RGB(12, 12, 12));
+    g_state_notice_font = CreateFontA(-19, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE,
+        FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+    g_state_notice = CreateWindowExA(
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+        notice_wc.lpszClassName, "", WS_POPUP, 0, 0, 230, 28,
+        g_video_window, NULL, wc.hInstance, NULL);
+    if (g_state_notice)
+        SetLayeredWindowAttributes(g_state_notice, 0, 225, LWA_ALPHA);
+    video_position_state_notice();
     g_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     g_bmi.bmiHeader.biWidth = g_present_coverage_2x ? PRESENT_W : VIDEO_W;
     g_bmi.bmiHeader.biHeight = -(LONG)(g_present_coverage_2x ? PRESENT_H : VIDEO_H);
@@ -602,6 +750,11 @@ void video_present(uint8_t* rdram, uint32_t origin, uint32_t width,
         g_last_height = height;
         g_last_format = format;
         g_tem_quadro_apresentado = 1;
+        /* F11 e avanço de navegação, não reprodução visual. A simulação deve
+           consumir diálogos e transições, mas apresentar cada quadro faria a
+           GPU pautar o relógio e deixaria na janela uma fala já obsoleta. Ao
+           soltar, a próxima tarefa completa volta a ser apresentada. */
+        if (hle_navigation_turbo_active()) return;
         g_last_present = GetTickCount64();
         rt64_backend_present();
         return;
@@ -714,6 +867,12 @@ apresentar:
 
 void video_shutdown(void) {
     rt64_backend_shutdown();
+    if (g_state_notice) DestroyWindow(g_state_notice);
+    g_state_notice = NULL;
+    if (g_state_notice_font) DeleteObject(g_state_notice_font);
+    g_state_notice_font = NULL;
+    if (g_state_notice_brush) DeleteObject(g_state_notice_brush);
+    g_state_notice_brush = NULL;
     if (g_video_window) DestroyWindow(g_video_window);
     g_video_window = NULL;
     g_video_enabled = 0;
@@ -721,4 +880,29 @@ void video_shutdown(void) {
 
 int video_quit_requested(void) { return g_video_quit; }
 int video_bookmark_restart_requested(void) { return g_bookmark_restart; }
+#ifdef RECOMP_STATEFUL
+int video_state_save_requested(void) { return g_state_save_request; }
+int video_state_load_requested(void) { return g_state_load_request; }
+void video_state_request_consumed(int save_request) {
+    if (save_request) g_state_save_request = 0;
+    else g_state_load_request = 0;
+}
+void video_state_notify(int slot, int save_request, int success) {
+    if (!g_state_notice || slot < 1 || slot > 9) return;
+    char text[64];
+    if (success)
+        snprintf(text, sizeof(text), "Slot %d %s", slot,
+                 save_request ? "salvo" : "carregado");
+    else
+        snprintf(text, sizeof(text), "Falha no slot %d", slot);
+    g_state_notice_color = success ? RGB(120, 255, 140) : RGB(255, 120, 120);
+    snprintf(g_state_notice_text, sizeof(g_state_notice_text), "%s", text);
+    video_position_state_notice();
+    ShowWindow(g_state_notice, SW_SHOWNA);
+    SetWindowPos(g_state_notice, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(g_state_notice, NULL, TRUE);
+    g_state_notice_until = GetTickCount64() + 1800u;
+}
+#endif
 void* video_native_window(void) { return g_video_window; }

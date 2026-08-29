@@ -23,6 +23,9 @@
 #include <string.h>
 
 #include "runtime.h"
+#ifdef RECOMP_STATEFUL
+#include "continuation.h"
+#endif
 #include "funcs.h"
 #include "trace.h"
 #include "legendas.h"
@@ -51,6 +54,7 @@ static size_t g_rom_size = 0;
 static volatile LONG g_reported = 0;
 static double g_timeout_s = 20.0;
 static unsigned g_frame_samples = 4;    /* quadros periodicos do watchdog */
+static int g_stall_watchdog = 0;
 /* Mesmo uma execucao diagnostica iniciada diretamente deve respeitar a
  * estrutura do projeto. TESTAR.bat substitui este prefixo pelo perfil ativo;
  * sem ele, nunca espalhar capturas e logs pela raiz. */
@@ -61,6 +65,8 @@ static int g_diagnostics = 0;
 #else
 static int g_diagnostics = 1;
 #endif
+
+int runtime_diagnostics_enabled(void) { return g_diagnostics; }
 
 
 /* ------------------------------------------------------------------ */
@@ -126,6 +132,7 @@ static size_t g_trace_distinct = 0;
 static uint32_t g_trace_order[TRACE_ORDER_MAX];
 static uint32_t g_last_traced = 0;
 static uint32_t g_main_last_traced = 0;
+static int g_trace_detail = 0;
 
 /* Trilha circular das ultimas funcoes alcancadas. Um contador por funcao diz o
    *quanto*; so a ordem diz *onde* uma thread desistiu. */
@@ -148,6 +155,11 @@ uint32_t trace_main_last_func(void) { return g_main_last_traced; }
 
 void recomp_trace(uint32_t vram) {
     g_last_traced = vram;
+    /* O hook existe em todas as 3.651 funcoes e roda dezenas de milhares de
+       vezes por segundo. Contagem, trilha e busca binaria sao diagnostico,
+       nao parte da execucao normal. Conservar apenas o ultimo endereco deixa
+       mensagens de erro uteis sem impor esse custo a cada chamada. */
+    if (!g_trace_detail) return;
     if (sched_current() == 0x800F9A50u) g_main_last_traced = vram;
     g_trail[g_trail_pos++ % TRAIL_MAX] = vram;
     g_trace_total++;
@@ -169,6 +181,9 @@ void recomp_trace(uint32_t vram) {
 }
 
 static void trace_init(void) {
+    const char* detail = getenv("WPJ2_TRACE_DETAIL");
+    g_trace_detail = detail && atoi(detail) != 0;
+    if (!g_trace_detail) return;
     g_trace_counts = (uint64_t*)calloc(g_func_table_size, sizeof(uint64_t));
 }
 
@@ -194,6 +209,11 @@ static void trace_dump_executed(const char* path) {
 }
 
 static void trace_report(void) {
+    if (!g_trace_detail) {
+        printf("funcoes executadas      : detalhamento desativado (WPJ2_TRACE_DETAIL=1 ativa)\n");
+        printf("ultima funcao alcancada : 0x%08X\n", g_last_traced);
+        return;
+    }
     printf("funcoes executadas      : %zu de %zu (%.1f%%)\n",
            g_trace_distinct, g_func_table_size,
            100.0 * (double)g_trace_distinct / (double)g_func_table_size);
@@ -460,11 +480,50 @@ static DWORD WINAPI watchdog(LPVOID param) {
         fflush(stdout);
     }
     if (g_diagnostics) {
-        report("tempo limite atingido (o boot ficou preso esperando hardware)");
+        report("tempo limite configurado atingido");
         fflush(stdout);
     }
+    perf_timeline_flush();
     TerminateProcess(GetCurrentProcess(), 6);
     return 0;
+}
+
+/* TESTAR normalmente nao possui timeout, então o watchdog historico nao
+ * existe nas sessoes interativas. Para congelamentos completos (video E audio
+ * parados), acompanhe tres relogios independentes: retrace, tarefas de audio e
+ * pontos de laco recompilados. Dez segundos sem mudanca nos tres geram o mesmo
+ * relatorio rico do F5/encerramento, sem exigir que o usuario consiga apertar
+ * uma tecla numa janela travada. Nao encerra o processo automaticamente. */
+static DWORD WINAPI stall_watchdog(LPVOID param) {
+    (void)param;
+    uint64_t retraces = hle_retraces();
+    uint64_t audio = rsp_tasks_tipo(2);
+    uint64_t polls = hle_polls();
+    unsigned parado = 0;
+    Sleep(5000);
+    for (;;) {
+        Sleep(1000);
+        uint64_t novo_retraces = hle_retraces();
+        uint64_t novo_audio = rsp_tasks_tipo(2);
+        uint64_t novo_polls = hle_polls();
+        if (novo_retraces == retraces && novo_audio == audio &&
+            novo_polls == polls) {
+            parado++;
+        } else {
+            parado = 0;
+            retraces = novo_retraces;
+            audio = novo_audio;
+            polls = novo_polls;
+        }
+        if (parado < 10u) continue;
+
+        printf("\n[stall] retrace, audio e CPU parados por 10 s; "
+               "capturando automaticamente\n");
+        trace_trail("congelamento completo");
+        report("watchdog: video, audio e CPU parados por 10 segundos");
+        fflush(stdout);
+        return 0;
+    }
 }
 
 static ULONG_PTR g_fault_addr = 0;
@@ -945,6 +1004,20 @@ recomp_func_t* get_function(int32_t vram) {
     printf("\n[parou] chamada indireta para 0x%08X, que nao e uma funcao conhecida\n", target);
     printf("        vinda de 0x%08X; %llu chamadas indiretas resolvidas antes desta\n",
            trace_last_func(), (unsigned long long)g_lookup_calls - 1);
+#ifdef RECOMP_STATEFUL
+    {
+        wpj2_continuation* cont = wpj2_cont_current();
+        if (cont) {
+            printf("        continuation depth=%u cursor=%u resume=%u\n",
+                   cont->depth, cont->cursor, cont->resuming);
+            uint32_t inicio = cont->depth > 8u ? cont->depth - 8u : 0u;
+            for (uint32_t i = inicio; i < cont->depth; i++)
+                printf("        frame[%u]=%08X/%08X\n", i,
+                       cont->frames[i].function_vram,
+                       cont->frames[i].callsite_vram);
+        }
+    }
+#endif
     if (target >= 0x80000400u && target < 0x800D6B70u) {
         printf("        o alvo esta dentro do segmento boot: limite de funcao errado\n");
         printf("        nos simbolos, nao um overlay ausente\n");
@@ -986,6 +1059,7 @@ static void report(const char* why) {
     printf("tarefas por tipo        : graficas=%llu audio=%llu outras=%llu\n",
            (unsigned long long)rsp_tasks_tipo(1), (unsigned long long)rsp_tasks_tipo(2),
            (unsigned long long)(rsp_tasks_tipo(0) + rsp_tasks_tipo(3)));
+    rt64_backend_perf_report();
     printf("comandos de audio       : %llu executado(s), %llu bytes gravados na RDRAM\n",
            (unsigned long long)rsp_acmd_run(), (unsigned long long)rsp_bytes_saved());
     printf("picos ACMD              : carregado=%u mixado=%u salvo=%u\n",
@@ -1048,8 +1122,10 @@ static void report(const char* why) {
  *     alvo=1234
  *     roteiro=0:0000;812:1000;830:0000
  *
- * `roteiro` tem exatamente a sintaxe de WPJ2_INPUT_POLLS, indexada por leitura
- * de controle e nao por tempo - e isso que torna a reproducao repetivel. */
+ * Bookmarks v1 usam leitura do PIF. Bookmarks v2 usam retrace emulado, pois a
+ * quantidade de consultas ao PIF varia com o escalonamento das fibers. */
+static uint64_t g_replay_target;
+
 static void carregar_replay(const char* caminho) {
     FILE* f = fopen(caminho, "r");
     if (!f) {
@@ -1061,22 +1137,30 @@ static void carregar_replay(const char* caminho) {
        truncar bookmarks de sessoes longas. */
     static char linha[131072];
     unsigned long long alvo = 0;
+    unsigned long long alvo_retrace = 0;
     while (fgets(linha, sizeof(linha), f)) {
         char* fim = linha + strlen(linha);
         while (fim > linha && (fim[-1] == '\n' || fim[-1] == '\r')) *--fim = '\0';
         if (linha[0] == '#' || !linha[0]) continue;
         if (!strncmp(linha, "alvo=", 5)) {
             alvo = strtoull(linha + 5, NULL, 10);
+        } else if (!strncmp(linha, "alvo_poll=", 10)) {
+            alvo = strtoull(linha + 10, NULL, 10);
+        } else if (!strncmp(linha, "alvo_retrace=", 13)) {
+            alvo_retrace = strtoull(linha + 13, NULL, 10);
         } else if (!strncmp(linha, "roteiro=", 8)) {
             pif_set_poll_script(linha + 8);
+        } else if (!strncmp(linha, "roteiro_retrace=", 16)) {
+            pif_set_retrace_script(linha + 16);
         }
     }
     fclose(f);
     printf("[replay] %s carregado\n", caminho);
-    /* O bookmark representa a leitura exata em que F2 foi pressionado. O
-       roteiro permanece ativo até lá; desacelerar antes fazia o usuário ainda
-       esperar cerca de um segundo para retornar à cena pedida. */
-    if (alvo) hle_definir_alvo_turbo(alvo);
+    /* No v2 o bookmark representa o retrace em que F2 foi pressionado; no v1,
+       a leitura do PIF. O roteiro permanece ativo até o respectivo alvo. */
+    g_replay_target = alvo;
+    if (alvo_retrace) hle_definir_alvo_turbo_retrace(alvo_retrace);
+    else if (alvo) hle_definir_alvo_turbo(alvo);
     fflush(stdout);
 }
 
@@ -1113,10 +1197,14 @@ int main(int argc, char** argv) {
        alcancavel com fibers, e por que a reproducao resolve melhor o problema
        real, que e voltar depressa a uma cena para analisar. */
     if ((e = getenv("WPJ2_REPLAY")) != NULL && *e) carregar_replay(e);
+    if ((e = getenv("WPJ2_STRESS_INPUT")) != NULL && *e)
+        pif_set_stress(e, g_replay_target);
     if ((e = getenv("WPJ2_STICK"))    != NULL) pif_set_stick(e);
     if ((e = getenv("WPJ2_RETRACE"))  != NULL) hle_set_retrace(atof(e));
     if ((e = getenv("WPJ2_WINDOW"))   != NULL) g_video_preview = atoi(e) != 0;
     if ((e = getenv("WPJ2_DEBUG"))    != NULL) g_diagnostics = atoi(e) != 0;
+    if ((e = getenv("WPJ2_STALL_WATCHDOG")) != NULL)
+        g_stall_watchdog = atoi(e) != 0;
     rsp_set_debug(g_diagnostics);
     /* O pipeline F3DEX aplica G_MTX/MOVEMEM aos vertices por padrao. A chave
        existe para diagnostico comparativo contra a antiga projecao ortografica. */
@@ -1175,12 +1263,18 @@ int main(int argc, char** argv) {
     ctx.r29 = (gpr)(int32_t)0x80400000;  /* o entrypoint define o seu proprio sp */
 
     if (g_timeout_s > 0.0) CreateThread(NULL, 0, watchdog, NULL, 0, NULL);
+    if (g_stall_watchdog)
+        CreateThread(NULL, 0, stall_watchdog, NULL, 0, NULL);
 
     printf("--- entrando em recomp_entrypoint ---\n");
     fflush(stdout);
 
     __try {
+#ifdef RECOMP_STATEFUL
+        sched_run_stateful(g_rdram, recomp_entrypoint, &ctx);
+#else
         recomp_entrypoint(g_rdram, &ctx);
+#endif
         report("o entrypoint retornou (sem interrupcoes, o boot nao tem para onde ir)");
     }
     __except (fault_filter(GetExceptionInformation())) {

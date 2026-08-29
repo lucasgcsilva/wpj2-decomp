@@ -45,14 +45,23 @@ static int16_t audio_apply_master_gain(int16_t sample) {
 /* Quanto esperar por um slot livre antes de desistir, em milissegundos. Zero
    volta ao comportamento antigo de descartar na hora, o que serve para medir a
    diferenca lado a lado. */
-static int g_play_wait_ms = 12;
+static int g_play_wait_ms = 0;
 static uint64_t g_play_drops;
+/* O backend de referencia mantem dezenas de milissegundos prontos antes de
+ * liberar o dispositivo. Sem essa reserva, a variacao normal entre ALists
+ * deixa o WinMM sem amostras e o mesmo solavanco fica audivel e visivel. */
+static int g_play_prebuffer_buffers = 4;
+static int g_play_started;
+static uint32_t g_play_queued_frames;
+static uint32_t g_play_target_frames;
+static uint64_t g_play_underflows;
 
-#define PLAY_SLOTS 8
+#define PLAY_SLOTS 12
 typedef struct {
     WAVEHDR header;
     uint8_t* pcm;
     int prepared;
+    uint32_t frames;
 } play_slot;
 static play_slot g_play[PLAY_SLOTS];
 /* A AI real possui FIFO de dois DMAs. A versao inicial acordava a ROM no VI
@@ -92,6 +101,42 @@ static uint64_t g_zq_frames;
 static LARGE_INTEGER g_zq_last;
 
 static void audio_ai_clock_init(void);
+static void audio_ai_arm_primary(uint32_t bytes);
+static void audio_play_reset_queue(void);
+
+void audio_state_capture(wpj2_audio_state_image* image) {
+    if (!image) return;
+    memset(image, 0, sizeof(*image));
+    image->rate = g_rate;
+    image->ai_primary_bytes = g_ai_primary_bytes;
+    image->ai_secondary_bytes = g_ai_secondary_bytes;
+    image->ai_virtual_remaining = g_ai_virtual_remaining;
+    image->ai_virtual_phase = g_ai_virtual_phase;
+    image->ai_vi_phase = g_ai_vi_phase;
+    image->ai_compat_pending = g_ai_compat_pending;
+    image->ai_compat_active = g_ai_compat_active;
+}
+
+void audio_state_restore(const wpj2_audio_state_image* image) {
+    if (!image) return;
+    if (image->rate) g_rate = image->rate;
+    g_ai_primary_bytes = image->ai_primary_bytes;
+    g_ai_secondary_bytes = image->ai_secondary_bytes;
+    g_ai_virtual_remaining = image->ai_virtual_remaining;
+    g_ai_virtual_phase = image->ai_virtual_phase;
+    g_ai_vi_phase = image->ai_vi_phase;
+    g_ai_compat_pending = image->ai_compat_pending;
+    g_ai_compat_active = image->ai_compat_active;
+    /* Prazos QPC pertencem ao processo atual. Rearmar a partir de agora evita
+     * uma interrupcao atrasada ou uma rajada depois do load. */
+    g_ai_freq.QuadPart = 0;
+    g_ai_due.QuadPart = 0;
+    g_ai_compat_due.QuadPart = 0;
+    g_ai_len_started.QuadPart = 0;
+    g_zq_last.QuadPart = 0;
+    audio_play_reset_queue();
+    if (g_ai_primary_bytes) audio_ai_arm_primary(g_ai_primary_bytes);
+}
 
 static void audio_zq_update(void) {
     if (!g_ai_zelda_queue) return;
@@ -225,10 +270,29 @@ static void audio_play_reap(int force) {
     for (int i = 0; i < PLAY_SLOTS; i++) {
         play_slot* s = &g_play[i];
         if (!s->pcm || (!force && !(s->header.dwFlags & WHDR_DONE))) continue;
+        if (s->frames >= g_play_queued_frames) g_play_queued_frames = 0;
+        else g_play_queued_frames -= s->frames;
         if (s->prepared && g_wave) waveOutUnprepareHeader(g_wave, &s->header, sizeof(s->header));
         free(s->pcm);
         memset(s, 0, sizeof(*s));
     }
+    if (!force && g_play_started && g_play_queued_frames == 0u) {
+        /* O dispositivo realmente consumiu tudo. Pare e reconstrua a reserva,
+         * em vez de alternar som/silencio a cada novo bloco atrasado. */
+        waveOutPause(g_wave);
+        g_play_started = 0;
+        g_play_underflows++;
+        perf_timeline_mark("audio_underflow", 0u, 0u);
+    }
+}
+
+static void audio_play_reset_queue(void) {
+    if (!g_wave) return;
+    waveOutReset(g_wave);
+    audio_play_reap(1);
+    g_play_started = 0;
+    g_play_queued_frames = 0;
+    waveOutPause(g_wave);
 }
 
 static void audio_play_open(void) {
@@ -244,12 +308,29 @@ static void audio_play_open(void) {
     if (waveOutOpen(&g_wave, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
         g_play_enabled = 0;
         printf("[audio] dispositivo WinMM indisponivel; a captura WAV continua\n");
+        return;
     }
+    /* Segure o dispositivo ate haver uma reserva inicial. O Project64/SDL faz
+     * isso dentro de sua fila; no WinMM precisamos explicitar a pausa. */
+    waveOutPause(g_wave);
+    g_play_started = 0;
+    g_play_queued_frames = 0;
+    g_play_target_frames = (g_rate / 30u) * (uint32_t)g_play_prebuffer_buffers;
+}
+
+static int16_t audio_read_host_sample(const uint8_t* rdram, uint32_t p,
+                                      uint32_t sample_index) {
+    int16_t sample = *(const int16_t*)((uintptr_t)(rdram + p + sample_index * 2u) ^ 2u);
+    return audio_apply_master_gain(sample);
 }
 
 static void audio_play_buffer(uint8_t* rdram, uint32_t p, uint32_t bytes) {
+    perf_timeline_mark("audio_begin", bytes, 0u);
     audio_play_open();
-    if (!g_wave) return;
+    if (!g_wave) {
+        perf_timeline_mark("audio_end", bytes, 0u);
+        return;
+    }
     audio_play_reap(0);
     /* Fila cheia: esperar, nao descartar.
      *
@@ -268,24 +349,31 @@ static void audio_play_buffer(uint8_t* rdram, uint32_t p, uint32_t bytes) {
      * defeito por outro pior. Se o limite estourar, contamos - assim o descarte
      * deixa de ser silencioso. */
     play_slot* slot = NULL;
+    int esperou_ms = 0;
     for (int tentativa = 0; tentativa < g_play_wait_ms && !slot; tentativa++) {
         for (int i = 0; i < PLAY_SLOTS; i++)
             if (!g_play[i].pcm) { slot = &g_play[i]; break; }
-        if (!slot) { Sleep(1); audio_play_reap(0); }
+        if (!slot) { Sleep(1); esperou_ms++; audio_play_reap(0); }
     }
     if (!slot) {
         for (int i = 0; i < PLAY_SLOTS; i++)
             if (!g_play[i].pcm) { slot = &g_play[i]; break; }
     }
-    if (!slot) { g_play_drops++; return; }
-    slot->pcm = (uint8_t*)malloc(bytes);
-    if (!slot->pcm) return;
-    for (uint32_t i = 0; i < bytes; i += 2) {
-        int16_t sample = *(const int16_t*)((uintptr_t)(rdram + p + i) ^ 2u);
-        *(int16_t*)(slot->pcm + i) = audio_apply_master_gain(sample);
+    if (!slot) {
+        g_play_drops++;
+        perf_timeline_mark("audio_drop", bytes, (uint32_t)esperou_ms);
+        return;
     }
+    uint32_t input_frames = bytes / 4u;
+    uint32_t output_frames = input_frames;
+    uint32_t output_bytes = output_frames * 4u;
+    slot->pcm = (uint8_t*)malloc(output_bytes);
+    if (!slot->pcm) return;
+    for (uint32_t i = 0; i < bytes / 2u; i++)
+        ((int16_t*)slot->pcm)[i] = audio_read_host_sample(rdram, p, i);
     slot->header.lpData = (LPSTR)slot->pcm;
-    slot->header.dwBufferLength = bytes;
+    slot->header.dwBufferLength = output_bytes;
+    slot->frames = output_frames;
     if (waveOutPrepareHeader(g_wave, &slot->header, sizeof(slot->header)) != MMSYSERR_NOERROR ||
         waveOutWrite(g_wave, &slot->header, sizeof(slot->header)) != MMSYSERR_NOERROR) {
         if (slot->header.dwFlags & WHDR_PREPARED)
@@ -295,6 +383,13 @@ static void audio_play_buffer(uint8_t* rdram, uint32_t p, uint32_t bytes) {
         return;
     }
     slot->prepared = 1;
+    g_play_queued_frames += output_frames;
+    if (!g_play_started && g_play_queued_frames >= g_play_target_frames) {
+        waveOutRestart(g_wave);
+        g_play_started = 1;
+    }
+    perf_timeline_mark("audio_queue", g_play_queued_frames, output_frames);
+    perf_timeline_mark("audio_end", bytes, (uint32_t)esperou_ms);
 }
 
 void audio_set_fast_forward(int enabled) {
@@ -305,12 +400,16 @@ void audio_set_fast_forward(int enabled) {
        avanco, descarte a fila hospedada; ao soltar, o proximo DMA volta a ser
        ouvido ja no ponto corrente, sem segundos de audio antigo acumulado. */
     if (enabled && g_wave) {
-        waveOutReset(g_wave);
-        audio_play_reap(1);
+        audio_play_reset_queue();
     }
 }
 
 void audio_init(void) {
+    const char* prebuffer = getenv("WPJ2_AUDIO_PREBUFFER");
+    if (prebuffer && *prebuffer) {
+        int v = atoi(prebuffer);
+        if (v >= 1 && v <= PLAY_SLOTS - 1) g_play_prebuffer_buffers = v;
+    }
     const char* espera = getenv("WPJ2_AUDIO_WAIT_MS");
     if (espera) {
         int v = atoi(espera);
@@ -373,7 +472,11 @@ void audio_init(void) {
     const char* enable = getenv("WPJ2_AUDIO");
     if (!enable || !*enable || *enable == '0') return;
     const char* path = getenv("WPJ2_AUDIO_WAV");
-    if (!path || !*path) path = "temp\\projeto\\audio_capture.wav";
+    /* Reproduzir e capturar são operações independentes. O perfil normal
+       mantém waveOut ativo, mas não deve converter e gravar cada amostra no
+       disco silenciosamente. A captura só existe quando um caminho foi
+       pedido explicitamente por um perfil de análise. */
+    if (!path || !*path) return;
     g_wav = fopen(path, "wb");
     if (!g_wav) {
         printf("[audio] nao foi possivel criar %s\n", path);
@@ -410,6 +513,8 @@ void audio_shutdown(void) {
        apontou; deixa-lo visivel evita que ele volte a passar despercebido. */
     printf("[audio] fila do host: %llu buffer(s) perdido(s) apos esperar %d ms\n",
            (unsigned long long)g_play_drops, g_play_wait_ms);
+    printf("[audio] fila do host: %llu esvaziamento(s) apos o pre-buffer\n",
+           (unsigned long long)g_play_underflows);
 }
 
 void audio_set_frequency(uint32_t hz) {
@@ -471,7 +576,8 @@ void audio_queue_ai_buffer(uint8_t* rdram, uint32_t address, uint32_t bytes) {
     rsp_audio_probe_ai_buffer(rdram, p, bytes);
     /* A interrupcao AI faz parte da emulacao mesmo quando a captura WAV esta
        desligada. O arquivo e apenas uma observacao opcional. */
-    if (g_play_enabled && !g_play_fast_forward)
+    if (g_play_enabled && !g_play_fast_forward &&
+        !hle_navigation_turbo_active())
         audio_play_buffer(rdram, p, bytes);
     audio_buffer_capture(rdram, p, bytes);
     if (!g_enabled || !g_wav) return;

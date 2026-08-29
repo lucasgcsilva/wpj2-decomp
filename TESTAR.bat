@@ -21,9 +21,13 @@ REM    audio_fonte   rota mais fiel: microcodigo real + cadencia virtual do AI
 REM    divergencia   varredura da bissecao HLE x microcodigo real
 REM    rt64_ref      backend RT64 paralelo, ROM japonesa e sem traducao
 REM    cpu           comparacao/fallback com rasterizador CPU antigo
+REM    stress N S    bookmark + entradas em 8x por N segundos, seed S
+REM    stress_loja N bookmark + Z, Comprar e D-direita por N segundos
+REM    stress_loja_visual N  o mesmo, com janela para inspecao/captura
 REM
 REM  Toda saida vai para temp\projeto\<perfil>\ conforme ESTRUTURA.md.
 REM  Fechar a janela encerra o teste. Nao ha limite de tempo.
+REM  Ctrl+Shift+1..9 salva; Ctrl+1..9 carrega; segure F11 para acelerar.
 REM ===========================================================================
 setlocal EnableDelayedExpansion
 call "%~dp0tools\env.cmd"
@@ -59,6 +63,8 @@ if /I "%PERFIL%"=="voz" set "SAIDA=%~dp0temp\projeto\voz_%ARG%"
 if not exist "%SAIDA%" mkdir "%SAIDA%"
 del /q "%SAIDA%\*.bmp" >nul 2>nul
 del /q "%SAIDA%\*.log" >nul 2>nul
+del /q "%SAIDA%\traducao_ausentes.tsv" >nul 2>nul
+del /q "%SAIDA%\traducao_validacao.tsv" >nul 2>nul
 set "WPJ2_CAPTURE_DIR=%SAIDA%"
 set "WPJ2_OUT=%SAIDA%\"
 set "WPJ2_STATUS_FILE=%SAIDA%\status.txt"
@@ -74,7 +80,8 @@ REM pela propria ROM, nao do HALFTONE global do GDI.
 set "WPJ2_PRESENT_SMOOTH=0"
 set "WPJ2_PRESENT_COVERAGE_2X=0"
 set "WPJ2_RDP_AA=1"
-set "WPJ2_AUDIO=1"
+REM Reprodução é padrão; captura WAV é opt-in nos perfis de áudio abaixo.
+set "WPJ2_AUDIO=0"
 set "WPJ2_AUDIO_PLAY=1"
 set "WPJ2_AUDIO_FAST=0"
 set "WPJ2_AUDIO_VOICE=-1"
@@ -100,17 +107,49 @@ set "WPJ2_BISSECAO="
 set "WPJ2_BUTTONS="
 set "WPJ2_WINDOW_TITLE=Wonder Project J2 - PT-BR + RT64 nativo"
 set "WPJ2_GFX_BACKEND=rt64"
+REM Vulkan foi 6x mais consistente que o D3D12 automatico no corredor do slot
+REM 1 e e a mesma API do projeto de referencia. Ainda pode ser substituido por
+REM quem iniciar o executavel diretamente com WPJ2_RT64_API=d3d12.
+set "WPJ2_RT64_API=vulkan"
+REM Os slots 1/2/3 alternam VI_ORIGIN a 60,00 Hz. Contar display lists dava
+REM falsos 20/30 fps porque um framebuffer pode ser composto/reusado por elas.
+set "WPJ2_RT64_REFRESH=display"
+REM A ponte isolada nao recebe o comando estendido de taxa que os ports
+REM modernos enviam ao RT64. Sem isto ele via original=0 e nao interpolava.
+set "WPJ2_RT64_ORIGINAL_RATE=60"
+REM Perfil interativo precisa se comportar como release. Sem esta chave, a
+REM build de sondagem percorria novamente toda display list, atualizava centenas
+REM de contadores, imprimia no console e exportava arquivos durante o jogo.
+set "WPJ2_DEBUG=0"
+REM A contagem completa faz busca binaria em toda chamada recompilada. O
+REM perfil normal conserva apenas o ultimo endereco para erros; diagnosticos
+REM dirigidos podem reativar tudo com WPJ2_TRACE_DETAIL=1.
+set "WPJ2_TRACE_DETAIL=0"
+set "WPJ2_RT64_PERF=0"
+REM Quatro blocos (~133 ms) absorvem variacao sem encher os oito slots WinMM.
+set "WPJ2_AUDIO_PREBUFFER=4"
+set "WPJ2_AUDIO_WAIT_MS=0"
 
 REM --- legendas PT-BR: LIGADAS POR PADRAO ------------------------------------
 REM Era o perfil padrao antes desta reescrita e voltou a ser. O catalogo fica
 REM em textos\ (local, derivado da ROM, fora do Git). "TESTAR.bat sem_legendas"
 REM roda em ingles para comparacao.
 set "WPJ2_LEGENDAS=%~dp0textos\traducao_ptbr.tsv"
-set "WPJ2_LEGENDAS_LOG=%SAIDA%\legendas_rota.tsv"
+set "WPJ2_LEGENDAS_LOG="
 REM Temporariamente ativo tambem no perfil padrao: as falas com controles E1
 REM e rolagem longa so podem ser confirmadas pelo recurso vivo do mesmo F5.
 REM O custo ocorre apenas ao apertar F5 e os dumps continuam em temp\.
 set "WPJ2_LEGENDAS_RDRAM_CAPTURE=1"
+REM Ring leve dos glifos/objetos recentes; somente TESTAR ativa. O F5 grava as
+REM coordenadas em TSV para rastrear Day/Progress sem sobrepor o framebuffer.
+set "WPJ2_F5_GLIFOS=1"
+REM Captura automaticamente estado/RDRAM/glifos quando video, audio e CPU
+REM ficarem simultaneamente sem progresso por 10 segundos.
+set "WPJ2_STALL_WATCHDOG=1"
+REM Auditoria de cobertura na entrada real do formatador. Registra uma vez cada
+REM frase consumida que nao possui chave EN nem forma PT-BR no catalogo.
+set "WPJ2_LEGENDAS_AUSENTES_LOG="
+set "WPJ2_LEGENDAS_VALIDACAO_LOG="
 if /I "%PERFIL%"=="sem_legendas" set "WPJ2_LEGENDAS="
 if /I "%PERFIL%"=="input"        set "WPJ2_LEGENDAS="
 if /I "%PERFIL%"=="divergencia"  set "WPJ2_LEGENDAS="
@@ -216,7 +255,12 @@ if /I "%PERFIL%"=="voz" (
 REM Auditoria da traducao. As legendas ja estao ligadas por padrao em todos os
 REM perfis; este acrescenta a captura de RDRAM no F5, para localizar recursos
 REM dinamicos que ainda nao aparecem no catalogo.
-if /I "%PERFIL%"=="legendas" set "WPJ2_LEGENDAS_RDRAM_CAPTURE=1"
+if /I "%PERFIL%"=="legendas" (
+  set "WPJ2_LEGENDAS_RDRAM_CAPTURE=1"
+  set "WPJ2_LEGENDAS_LOG=%SAIDA%\legendas_rota.tsv"
+  set "WPJ2_LEGENDAS_AUSENTES_LOG=%SAIDA%\traducao_ausentes.tsv"
+  set "WPJ2_LEGENDAS_VALIDACAO_LOG=%SAIDA%\traducao_validacao.tsv"
+)
 
 if /I "%PERFIL%"=="audio_rsp" (
   set "WPJ2_NATIVE_AUDIO_RSP=1"
@@ -248,8 +292,61 @@ if /I "%PERFIL%"=="divergencia" (
   set "WPJ2_WINDOW=0"
 )
 
-REM WAV para analise posterior, exceto na sonda de entrada.
-if /I not "%PERFIL%"=="input" set "WPJ2_AUDIO_WAV=%SAIDA%\audio.wav"
+REM Stress automatizado: reproduz o bookmark F2 existente em turbo e, ao
+REM alcanca-lo, percorre botoes/D-Pad/C-Buttons/analogico deterministicamente.
+REM O segundo argumento e a duracao em segundos (padrao: 300) e o terceiro a
+REM seed que desloca a sequencia de entradas (padrao: 1).
+if /I "%PERFIL%"=="stress" (
+  set "WPJ2_TIMEOUT=%ARG%"
+  if "%ARG%"=="" set "WPJ2_TIMEOUT=300"
+  set "WPJ2_WINDOW=0"
+  set "WPJ2_AUDIO_PLAY=0"
+  set "WPJ2_RETRACE=480"
+  set "WPJ2_REPLAY=%WPJ2_BOOKMARK_DIR%\quick.replay"
+  if not exist "!WPJ2_REPLAY!" set "WPJ2_REPLAY="
+  set "WPJ2_STRESS_INPUT=%~3"
+  if "%~3"=="" set "WPJ2_STRESS_INPUT=1"
+  set "WPJ2_WINDOW_TITLE=Wonder Project J2 - stress automatizado"
+)
+
+REM Reproducao dirigida da loja: Z abre o computador, A entra em Comprar e
+REM depois D-direita e pulsado continuamente. A duracao padrao deixa mais de
+REM dez segundos reais somente para percorrer os itens.
+if /I "%PERFIL%"=="stress_loja" (
+  set "WPJ2_TIMEOUT=%ARG%"
+  if "%ARG%"=="" set "WPJ2_TIMEOUT=75"
+  set "WPJ2_WINDOW=0"
+  set "WPJ2_AUDIO_PLAY=0"
+  set "WPJ2_RETRACE=480"
+  set "WPJ2_REPLAY=%WPJ2_BOOKMARK_DIR%\quick.replay"
+  if not exist "!WPJ2_REPLAY!" set "WPJ2_REPLAY="
+  set "WPJ2_STRESS_INPUT=shop"
+  set "WPJ2_WINDOW_TITLE=Wonder Project J2 - stress dirigido da loja"
+)
+if /I "%PERFIL%"=="stress_loja_visual" (
+  set "WPJ2_TIMEOUT=%ARG%"
+  if "%ARG%"=="" set "WPJ2_TIMEOUT=75"
+  set "WPJ2_WINDOW=1"
+  set "WPJ2_AUDIO_PLAY=0"
+  set "WPJ2_RETRACE=480"
+  set "WPJ2_REPLAY=%WPJ2_BOOKMARK_DIR%\quick.replay"
+  if not exist "!WPJ2_REPLAY!" set "WPJ2_REPLAY="
+  set "WPJ2_STRESS_INPUT=shop"
+  set "WPJ2_WINDOW_TITLE=Wonder Project J2 - stress visual da loja"
+)
+
+REM Captura WAV somente em perfis cujo objetivo é analisar áudio. No perfil
+REM padrão ela gerava I/O e conversão PCM contínuos sem benefício ao jogador.
+if /I "%PERFIL%"=="audio"       set "WPJ2_AUDIO=1"
+if /I "%PERFIL%"=="audio_rsp"   set "WPJ2_AUDIO=1"
+if /I "%PERFIL%"=="audio_fonte" set "WPJ2_AUDIO=1"
+if /I "%PERFIL%"=="divergencia" set "WPJ2_AUDIO=1"
+if /I "%PERFIL%"=="voz"        set "WPJ2_AUDIO=1"
+if "%WPJ2_AUDIO%"=="1" set "WPJ2_AUDIO_WAV=%SAIDA%\audio.wav"
+
+REM Perfis especializados existem para gerar evidencias e mantêm a telemetria.
+REM `padrao` e `sem_legendas` sao os dois caminhos de jogo/comparacao release.
+if /I not "%PERFIL%"=="padrao" if /I not "%PERFIL%"=="sem_legendas" set "WPJ2_DEBUG=1"
 
 REM --- execucao -------------------------------------------------------------
 echo.
@@ -258,7 +355,7 @@ echo   ------------------------------------------------
 if /I not "%PERFIL%"=="input" if /I not "%PERFIL%"=="divergencia" (
   echo    Enter=START   X/Espaco=A   Z=B   C=Z   Q/E=L/R
   echo    WASD=D-Pad   Setas=analogico   IJKL=C-Buttons
-  echo    F5 captura   F6 historico   F2 salva/F4 retorna   segure F11=8x
+  echo    F5 captura   F6 historico   Ctrl+Shift+1..9 salva   Ctrl+1..9 carrega   F11=8x
   echo.
   echo    Feche a janela para encerrar.
 )

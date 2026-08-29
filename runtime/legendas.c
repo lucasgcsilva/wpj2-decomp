@@ -15,6 +15,7 @@
 #define MAX_ENTRIES          8192u
 #define MAX_TEXT             511u
 #define HASH_BUCKETS         8191u
+#define FOLGA_MAX            96u
 
 /* ---------------------------------------------------------------------------
  * Arena de realocacao (experimental, WPJ2_REALOCAR=1)
@@ -68,69 +69,190 @@ static int g_initialized;
 static int g_enabled;
 static FILE* g_trace;
 static uint32_t g_trace_lines;
+static FILE* g_missing_trace;
+static FILE* g_validation_trace;
+#define MISSING_HASH_CAP 4096u
+static uint64_t g_missing_hashes[MISSING_HASH_CAP];
+static uint32_t g_missing_count;
 static subtitle_entry_t* find_entry(const char* source);
+static subtitle_entry_t* find_translated_entry(const char* translated);
 static subtitle_entry_t* find_entry_longest_prefix(const char* source,
                                                     size_t available);
 static subtitle_entry_t* find_entry_longest_translated_prefix(
     const char* source, size_t available);
 static void trace_source(const char* status, const char* source);
+static size_t cart_control_bytes(uint8_t code, uint8_t argument);
 
-/* O formatador do Ryu aceita linhas inglesas muito próximas da borda. A
- * tradução pode conservar exatamente o mesmo número de caracteres e ainda
- * ficar mais larga em pixels ("Behind" -> "Atrás", por exemplo). Nesse caso
- * o motor faz uma quebra automática e logo depois encontra a quebra explícita
- * do recurso: são duas rolagens sobre o mesmo framebuffer, deixando letras
- * antigas misturadas às novas.
+#define DIALOG_LINE_PIXELS 232u
+
+/* Avanco horizontal observado na propria rotina nativa da fonte Ryu. A
+ * metrica anterior contava caracteres, mas a fonte e proporcional: 'i' e
+ * 'l' ocupam 2 px, enquanto 'm', 'w' e a maioria das maiusculas ocupam 8 px.
+ * Isso explica por que linhas com menos de 38 caracteres ainda estouravam. */
+static unsigned dialogue_byte_width(unsigned char c) {
+    if (c == ' ') return 6u;
+    if (c >= 'A' && c <= 'Z') {
+        switch (c) {
+            case 'E': case 'F': case 'L': case 'P': case 'T': return 6u;
+            case 'I': return 2u;
+            case 'J': return 6u;
+            default: return 8u;
+        }
+    }
+    if (c >= 'a' && c <= 'z') {
+        switch (c) {
+            case 'i': case 'l': return 2u;
+            case 'f': case 'j': case 'r': case 't': return 4u;
+            case 'm': case 'w': return 8u;
+            default: return 6u;
+        }
+    }
+    /* Codigos reaproveitados pelos acentos PT-BR. */
+    switch (c) {
+        case 0x23: case 0x24: case 0x25: case 0x26: /* a */
+        case 0x2A: case 0x2B:                         /* e */
+        case 0x3B: case 0x3C: case 0x3D:             /* o */
+        case 0x3E: case 0x40:                         /* u/c */
+            return 6u;
+        case 0x2F:                                    /* i */
+            return 2u;
+        case '!': case ',': case ':': case '\'':
+            return 2u;
+        default:
+            return 6u;
+    }
+}
+
+/* Ajusta somente a quebra que o compositor faria no meio de uma palavra.
  *
- * Mensagens compostas já chegam aqui depois de vsprintf. Refluí-las numa
- * cadeia única, usando uma margem conservadora de 38 glifos, mantém controles
- * E0/E1/E2 intactos e deixa a própria rotina de texto executar cada rolagem
- * uma única vez. As quebras do patch inglês são de layout, não de parágrafo,
- * portanto entram como espaços e são recalculadas. */
-#define DIALOG_LINE_GLYPHS 38u
-static size_t reflow_dialogue(unsigned char* text, size_t length,
-                              size_t capacity) {
-    unsigned char tmp[SCRATCH_SLOT_BYTES];
-    size_t out = 0, line = 0, last_space = (size_t)-1;
+ * Uma quebra ja presente no recurso e semantica: pode acionar rolagem,
+ * animacao ou um controle E0/E1/E2 na linha seguinte. Portanto, se houver
+ * '\n' ou '\r', esta rotina nao toca em byte algum. Quando nao ha quebra, a
+ * largura nativa continua sendo a autoridade; apenas trocamos o ultimo espaco
+ * anterior ao estouro por '\n'. O comprimento e a posicao de todos os bytes
+ * posteriores permanecem iguais, inclusive controles de nome como E0 01. */
+size_t legendas_ajustar_quebra_automatica(unsigned char* text, size_t length) {
+    for (size_t i = 0; i < length; i++)
+        if (text[i] == '\n' || text[i] == '\r') return length;
 
-    for (size_t in = 0; in < length; in++) {
-        unsigned char b = text[in];
-        if (b >= 0xE0u && b <= 0xE2u && in + 1u < length) {
-            if (out + 2u >= capacity) return length;
-            tmp[out++] = b;
-            tmp[out++] = text[++in];
+    size_t inicio_linha = 0;
+    size_t ultimo_espaco = (size_t)-1;
+    unsigned pixels = 0;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char b = text[i];
+        if (b >= 0xE0u && b <= 0xE2u && i + 1u < length) {
+            size_t controle = cart_control_bytes(b, text[i + 1u]);
+            if (i + controle <= length) i += controle - 1u;
             continue;
         }
-        if (b == '\r') continue;
-        if (b == '\n') b = ' ';
-        if (b == ' ') {
-            if (!out || tmp[out - 1u] == ' ' || tmp[out - 1u] == '\n')
+        if (b == ' ') ultimo_espaco = i;
+        pixels += dialogue_byte_width(b);
+        if (pixels <= DIALOG_LINE_PIXELS) continue;
+
+        /* Sem espaco nesta linha nao existe fronteira segura para antecipar;
+         * deixe o comportamento nativo intacto. */
+        if (ultimo_espaco == (size_t)-1 || ultimo_espaco < inicio_linha)
+            continue;
+
+        text[ultimo_espaco] = '\n';
+        inicio_linha = ultimo_espaco + 1u;
+        pixels = 0;
+        ultimo_espaco = (size_t)-1;
+        for (size_t p = inicio_linha; p <= i; p++) {
+            unsigned char c = text[p];
+            if (c >= 0xE0u && c <= 0xE2u && p + 1u <= i) {
+                size_t controle = cart_control_bytes(c, text[p + 1u]);
+                if (p + controle - 1u <= i) p += controle - 1u;
                 continue;
+            }
+            if (c == ' ') ultimo_espaco = p;
+            pixels += dialogue_byte_width(c);
+        }
+    }
+    return length;
+}
+
+/* Mensagens compostas podem conter uma quebra explícita depois de cada
+ * fragmento do patch inglês. Se a tradução fica mais larga, o motor quebra
+ * automaticamente antes dela e a quebra explícita causa uma segunda rolagem.
+ *
+ * Primeiro eliminamos apenas espaços de preenchimento imediatamente antes de
+ * '\n'. Depois, quando uma linha ainda excede 232 px, movemos A MESMA quebra
+ * para o último espaço anterior ao estouro. O número de quebras não aumenta;
+ * controles E0/E1/E2 são copiados juntos e continuam com largura zero. */
+static size_t reflow_dialogue_composto(unsigned char* text, size_t length,
+                                       size_t capacity) {
+    unsigned char tmp[SCRATCH_SLOT_BYTES];
+    size_t out = 0;
+    for (size_t in = 0; in < length; in++) {
+        unsigned char b = text[in];
+        if (b == '\r') continue;
+        if (b == '\n') {
+            while (out && tmp[out - 1u] == ' ') out--;
             if (out + 1u >= capacity) return length;
-            last_space = out;
-            tmp[out++] = ' ';
-            line++;
+            tmp[out++] = '\n';
             continue;
         }
         if (out + 1u >= capacity) return length;
         tmp[out++] = b;
-        line++;
-        if (line > DIALOG_LINE_GLYPHS && last_space != (size_t)-1) {
-            tmp[last_space] = '\n';
-            line = 0;
-            for (size_t p = last_space + 1u; p < out; p++) {
-                if (tmp[p] >= 0xE0u && tmp[p] <= 0xE2u && p + 1u < out) {
-                    p++;
-                } else if (tmp[p] >= 0x20u) {
-                    line++;
-                }
+        if (b >= 0xE0u && b <= 0xE2u && in + 1u < length) {
+            size_t controle = cart_control_bytes(b, text[in + 1u]);
+            for (size_t k = 1; k < controle && in + k < length; k++) {
+                if (out + 1u >= capacity) return length;
+                tmp[out++] = text[in + k];
             }
-            last_space = (size_t)-1;
+            in += controle - 1u;
         }
     }
-    while (out && (tmp[out - 1u] == ' ' || tmp[out - 1u] == '\n')) out--;
     memcpy(text, tmp, out);
-    return out;
+    length = out;
+
+    size_t inicio = 0;
+    while (inicio < length) {
+        size_t fim = inicio;
+        while (fim < length && text[fim] != '\n') fim++;
+
+        unsigned pixels = 0;
+        size_t ultimo_espaco = (size_t)-1;
+        size_t quebra = (size_t)-1;
+        for (size_t i = inicio; i < fim; i++) {
+            unsigned char b = text[i];
+            if (b >= 0xE0u && b <= 0xE2u && i + 1u < fim) {
+                size_t controle = cart_control_bytes(b, text[i + 1u]);
+                if (i + controle <= fim) i += controle - 1u;
+                continue;
+            }
+            if (b == ' ') ultimo_espaco = i;
+            pixels += dialogue_byte_width(b);
+            if (pixels > DIALOG_LINE_PIXELS &&
+                ultimo_espaco != (size_t)-1 && ultimo_espaco >= inicio) {
+                quebra = ultimo_espaco;
+                break;
+            }
+        }
+
+        if (quebra == (size_t)-1) {
+            inicio = fim < length ? fim + 1u : length;
+            continue;
+        }
+
+        /* Um newline imediatamente antes do fim da cadeia encerra a fala; ele
+         * nao e uma linha disponivel para word-wrap. Reaproveita-lo criava uma
+         * terceira linha, fazia o compositor voltar a y=0 e escrevia por cima
+         * da primeira. Se a ultima linha nao couber, a traducao precisa ser
+         * encurtada ou a quebra interna anterior rebalanceada. */
+        if (fim + 1u == length) {
+            trace_source("recurso_ptbr_ultima_linha_longa",
+                         "mensagem composta");
+            inicio = length;
+            continue;
+        }
+
+        text[quebra] = '\n';
+        if (fim < length) text[fim] = ' ';
+        inicio = quebra + 1u;
+    }
+    return length;
 }
 
 /* Estado da arena. Contadores existem para o veredito nao depender de
@@ -542,6 +664,7 @@ static const uint8_t k_ordinal_feminino[8] =
 #define COD_A_AGUDO  0x23u   /* era # */
 #define COD_A_CIRC   0x24u   /* era $ */
 #define COD_A_TIL    0x25u   /* era % */
+#define COD_A_TIL_PRE_FORMATO 0x7Fu
 #define COD_A_GRAVE  0x26u   /* era & */
 #define COD_E_AGUDO  0x2Au   /* era * */
 #define COD_E_CIRC   0x2Bu   /* era + */
@@ -1753,6 +1876,37 @@ static size_t make_ascii(char* out, size_t capacity, const char* text) {
     return written;
 }
 
+/* Antes de func_8008EDA4, 0x25 ainda e o operador '%' do formatador; depois
+ * dela, o mesmo byte e o glifo 'ã' instalado na fonte Ryu. Use 0x7F como
+ * representacao transitória somente para um 'ã' vindo de UTF-8. O banco
+ * ingles do patch aceita ASCII ate 0x7E e portanto 0x7F nao colide com texto
+ * nem com os controles E0/E1/E2. A rota tardia o converte de volta. */
+static size_t make_ascii_pre_formatador(char* out, size_t capacity,
+                                        const char* text) {
+    size_t in = 0, written = 0;
+    if (!capacity) return 0;
+    while (text[in] && written + 1u < capacity) {
+        size_t advance;
+        unsigned char original = (unsigned char)text[in];
+        uint8_t folded = (uint8_t)fold_utf8(
+            (const unsigned char*)text + in, &advance);
+        if (folded == COD_A_TIL && original >= 0x80u)
+            folded = COD_A_TIL_PRE_FORMATO;
+        out[written++] = (char)folded;
+        in += advance;
+    }
+    out[written] = '\0';
+    return written;
+}
+
+/* Tamanho cru de um controle do patch Ryu. E0/E1/E2 normalmente carregam um
+ * argumento. A variante E2 06 carrega ainda um word (por exemplo 80 10) que
+ * controla a cadencia dentro da palavra. Tratar apenas os dois primeiros
+ * bytes fazia a leitura abortar ao encontrar 0x80 e deixava a fala em ingles. */
+static size_t cart_control_bytes(uint8_t code, uint8_t argument) {
+    return code == 0xE2u && argument == 0x06u ? 4u : 2u;
+}
+
 static int cart_text_has_format_collision(const char* text) {
     size_t in = 0;
     while (text[in]) {
@@ -1855,6 +2009,28 @@ static void init_once(void) {
         g_trace = fopen(trace_path, "w");
         if (g_trace) fprintf(g_trace, "status\tsource_en\n");
     }
+    const char* missing_path = getenv("WPJ2_LEGENDAS_AUSENTES_LOG");
+    if (missing_path && *missing_path) {
+        g_missing_trace = fopen(missing_path, "a+");
+        if (g_missing_trace) {
+            fseek(g_missing_trace, 0, SEEK_END);
+            if (ftell(g_missing_trace) == 0)
+                fputs("ponteiro\tcaller\ttexto_consumido\n", g_missing_trace);
+            fflush(g_missing_trace);
+        }
+    }
+    const char* validation_path = getenv("WPJ2_LEGENDAS_VALIDACAO_LOG");
+    if (validation_path && *validation_path) {
+        g_validation_trace = fopen(validation_path, "a+");
+        if (g_validation_trace) {
+            fseek(g_validation_trace, 0, SEEK_END);
+            if (ftell(g_validation_trace) == 0)
+                fputs("status\tponteiro_origem\tponteiro_impresso\tcaller\t"
+                      "identificado\tesperado_ptbr\tconsumido\n",
+                      g_validation_trace);
+            fflush(g_validation_trace);
+        }
+    }
 }
 
 /* `novo_ponteiro` nao-nulo autoriza a realocacao: quando a traducao nao couber
@@ -1877,7 +2053,8 @@ static int substituir_interno(uint8_t* rdram, uint32_t pointer,
     typedef struct {
         uint16_t source_offset;
         uint16_t translated_offset;
-        uint8_t code, argument;
+        uint8_t bytes[4];
+        uint8_t length;
     } text_control_t;
     text_control_t controls[32];
     size_t source_n = 0, raw_n = 0, control_n = 0;
@@ -1895,15 +2072,28 @@ static int substituir_interno(uint8_t* rdram, uint32_t pointer,
         if (value >= 0xE0u && value <= 0xE2u &&
             raw_n < MAX_TEXT && phys + raw_n < RDRAM_LIMIT) {
             uint8_t arg = rd8(rdram, phys + (uint32_t)raw_n++);
+            size_t control_bytes = cart_control_bytes(value, arg);
+            if (control_bytes == 4u) {
+                if (raw_n + 2u > MAX_TEXT || phys + raw_n + 2u > RDRAM_LIMIT)
+                    return 0;
+            }
             if (control_n < sizeof(controls) / sizeof(controls[0])) {
                 controls[control_n].source_offset = (uint16_t)source_n;
-                controls[control_n].code = value;
-                controls[control_n].argument = arg;
+                controls[control_n].bytes[0] = value;
+                controls[control_n].bytes[1] = arg;
+                controls[control_n].length = (uint8_t)control_bytes;
+                if (control_bytes == 4u) {
+                    controls[control_n].bytes[2] =
+                        rd8(rdram, phys + (uint32_t)raw_n);
+                    controls[control_n].bytes[3] =
+                        rd8(rdram, phys + (uint32_t)raw_n + 1u);
+                }
                 control_n++;
             }
+            if (control_bytes == 4u) raw_n += 2u;
             continue;
         }
-        if (value == '\n' || value == '\r' ||
+        if (value == '\n' || value == '\r' || value == COD_A_TIL_PRE_FORMATO ||
             (value >= 0x20u && value <= 0x7Eu)) {
             source[source_n++] = (char)value;
         } else {
@@ -1917,32 +2107,41 @@ static int substituir_interno(uint8_t* rdram, uint32_t pointer,
     if (!source_n) return 0;
 
     subtitle_entry_t* entry = find_entry(source);
+    if (!entry && antes_formatador) {
+        /* O mesmo bloco pode atravessar a rota precoce mais de uma vez. Na
+         * segunda passagem ele ja esta em PT-BR, possivelmente com 0x25
+         * restaurado pela rota tardia. Reconheca a forma traduzida completa e
+         * regrave 0x7F antes de expo-la novamente ao formatador. */
+        char translated_key[MAX_TEXT + 1];
+        memcpy(translated_key, source, source_n + 1u);
+        for (size_t i = 0; i < source_n; i++)
+            if ((uint8_t)translated_key[i] == COD_A_TIL_PRE_FORMATO)
+                translated_key[i] = (char)COD_A_TIL;
+        entry = find_translated_entry(translated_key);
+    }
     if (!entry) return 0;
 
-    /* Regra global de fase.
-     *
-     * O patch Ryu usa '%' como comando em func_8008EDA4, enquanto a fonte
-     * PT-BR reutiliza o mesmo byte para o glifo 'ã'. Qualquer substituição
-     * anterior ao formatador transformaria a letra em especificador e poderia
-     * prender o laço interno, parando vídeo/input enquanto o áudio continua.
-     * Não tente escapar com "%%": há recursos que passam pelo formatador mais
-     * de uma vez. A única solução estável é adiar a troca para 80090E58, que é
-     * posterior à formatação. */
-    if (antes_formatador && cart_text_has_format_collision(entry->translated)) {
-        trace_source("recurso_ptbr_adiado_formato", source);
-        return 0;
-    }
-
     char translated[SCRATCH_SLOT_BYTES];
-    size_t translated_n = make_ascii(translated, sizeof(translated), entry->translated);
-    size_t encoded_n = translated_n + control_n * 2u;
+    size_t translated_n = antes_formatador
+        ? make_ascii_pre_formatador(translated, sizeof(translated),
+                                    entry->translated)
+        : make_ascii(translated, sizeof(translated), entry->translated);
+    /* Se o recurso original ja delimitava linhas, a traducao/catalogo e a
+     * autoridade e nenhuma quebra e recalculada. Sem delimitador explicito,
+     * apenas evite que o limite nativo corte uma palavra ao meio. */
+    if (!memchr(source, '\n', source_n) && !memchr(source, '\r', source_n))
+        legendas_ajustar_quebra_automatica((unsigned char*)translated,
+                                           translated_n);
+    size_t encoded_n = translated_n;
+    for (size_t i = 0; i < control_n; i++) encoded_n += controls[i].length;
 
     /* O carregador pode ter preparado um slot ao encontrar uma cadeia longa,
      * antes de func_800319B0 publicar a string individual. Nesse segundo
      * ponto, nao volte a considerar zeros adjacentes como capacidade: alem de
      * ignorar a arena ja validada, isso recolocaria o risco de invadir o
      * registro seguinte. Controles usam o anel e nao podem compartilhar cache. */
-    if (novo_ponteiro && control_n == 0 && entry->slot_phys) {
+    if (novo_ponteiro && control_n == 0 && entry->slot_phys &&
+        !antes_formatador) {
         *novo_ponteiro = 0x80000000u | entry->slot_phys;
         trace_source("recurso_ptbr_arena_cache", source);
         return 1;
@@ -1968,7 +2167,6 @@ static int substituir_interno(uint8_t* rdram, uint32_t pointer,
      * 0..encoded_n-1 e o NUL em encoded_n, logo a condicao e
      * encoded_n <= raw_n + folga - 1. O teto evita que uma regiao grande de
      * zeros - que pode ser outra coisa, e nao enchimento - seja invadida. */
-    #define FOLGA_MAX 96u
     size_t folga = 0;
     while (folga < FOLGA_MAX && phys + raw_n + folga < RDRAM_LIMIT &&
            rd8(rdram, phys + (uint32_t)(raw_n + folga)) == 0)
@@ -1990,23 +2188,33 @@ static int substituir_interno(uint8_t* rdram, uint32_t pointer,
             trace_source("recurso_ptbr_longo", source);
             return 0;
         }
+        destino = 0;
         /* Sem controles, a entrada sempre gera os mesmos bytes: um slot fixo
          * serve para sempre e as chamadas seguintes nem reescrevem. */
         if (control_n == 0 && entry->slot_phys) {
-            *novo_ponteiro = 0x80000000u | entry->slot_phys;
-            trace_source("recurso_ptbr_arena_cache", source);
-            return 1;
+            if (!antes_formatador) {
+                *novo_ponteiro = 0x80000000u | entry->slot_phys;
+                trace_source("recurso_ptbr_arena_cache", source);
+                return 1;
+            }
+            /* A rota tardia troca 0x7F pelo glifo 0x25 no proprio slot. Ao
+             * publicar a mesma mensagem novamente, regrave a forma segura
+             * antes de ela atravessar o formatador. */
+            destino = entry->slot_phys;
+            capacidade = encoded_n;
+            realocado = 1;
+            *novo_ponteiro = 0x80000000u | destino;
         }
         size_t precisa = encoded_n + 1u;
-        if (control_n == 0) {
+        if (!destino && control_n == 0) {
             destino = arena_alocar_fixo(precisa);
             if (destino) {
                 entry->slot_phys = destino;
                 entry->slot_bytes = (uint32_t)precisa;
             }
-        } else if (precisa <= ARENA_ANEL_BYTES) {
+        } else if (!destino && precisa <= ARENA_ANEL_BYTES) {
             destino = arena_alocar_anel();
-        } else {
+        } else if (!destino) {
             destino = 0;
         }
         if (!destino) {
@@ -2033,6 +2241,39 @@ static int substituir_interno(uint8_t* rdram, uint32_t pointer,
         size_t mapped;
         if (!offset) {
             mapped = 0;
+        } else if (memchr(source, '\n', offset) != NULL) {
+            /* E0/E1 no inicio de uma linha carregam variaveis como o nome da
+             * protagonista. Mapear apenas pela quantidade total de letras
+             * deslocava o marcador quando a primeira linha PT-BR era maior:
+             * "nao se preocuJosettepe" era exatamente esse caso. Preserve o
+             * numero da linha e a coluna; se a traducao manteve a quebra, a
+             * estrutura do recurso e uma referencia mais forte que tamanho. */
+            size_t source_line = 0, source_start = 0;
+            for (size_t p = 0; p < offset; p++) {
+                if (source[p] == '\n') {
+                    source_line++;
+                    source_start = p + 1u;
+                }
+            }
+            size_t translated_start = 0, translated_line = 0;
+            for (size_t p = 0; p < translated_n && translated_line < source_line;
+                 p++) {
+                if (translated[p] == '\n') {
+                    translated_line++;
+                    translated_start = p + 1u;
+                }
+            }
+            if (translated_line == source_line) {
+                size_t column = offset - source_start;
+                size_t translated_end = translated_start;
+                while (translated_end < translated_n &&
+                       translated[translated_end] != '\n')
+                    translated_end++;
+                mapped = translated_start + column;
+                if (mapped > translated_end) mapped = translated_end;
+            } else {
+                mapped = source_n ? (offset * translated_n) / source_n : 0;
+            }
         } else if (offset >= source_n) {
             mapped = translated_n;
         } else if (source_colon && translated_colon && offset <= source_colon_pos) {
@@ -2051,8 +2292,9 @@ static int substituir_interno(uint8_t* rdram, uint32_t pointer,
     for (size_t pos = 0; pos <= translated_n; pos++) {
         for (size_t i = 0; i < control_n; i++) {
             if (controls[i].translated_offset == pos) {
-                wr8(rdram, destino + (uint32_t)out++, controls[i].code);
-                wr8(rdram, destino + (uint32_t)out++, controls[i].argument);
+                for (size_t j = 0; j < controls[i].length; j++)
+                    wr8(rdram, destino + (uint32_t)out++,
+                        controls[i].bytes[j]);
             }
         }
         if (pos < translated_n)
@@ -2091,6 +2333,56 @@ int legendas_substituir_recurso_com_capacidade(uint8_t* rdram, uint32_t pointer,
     return substituir_interno(rdram, pointer, NULL, slot_bytes, 0);
 }
 
+void legendas_substituir_bloco_estatico(uint8_t* rdram, uint32_t pointer,
+                                        uint32_t bytes) {
+    init_once();
+    if (!g_enabled || !bytes) return;
+    uint32_t base = pointer & 0x1FFFFFFFu;
+    if (base >= RDRAM_LIMIT || bytes > RDRAM_LIMIT - base) return;
+
+    /* Tabelas como a da loja misturam ponteiros, números e pequenas cadeias
+     * terminadas em NUL. Procuramos somente inícios precedidos por NUL (ou pelo
+     * começo do bloco), exigimos texto ASCII completo e consultamos a chave
+     * exata no catálogo. Assim bytes binários que apenas se parecem com texto
+     * não são tocados. A folga de zeros pertence ao slot até o próximo campo e
+     * permite, por exemplo, Buy -> Comprar sem deslocar nenhum ponteiro. */
+    uint32_t off = 0;
+    while (off < bytes) {
+        if (off && rd8(rdram, base + off - 1u) != 0) {
+            off++;
+            continue;
+        }
+        uint32_t n = 0;
+        while (off + n < bytes && n < MAX_TEXT) {
+            uint8_t c = rd8(rdram, base + off + n);
+            if (!c) break;
+            if ((c < 0x20u || c > 0x7Eu) && c != '\n' && c != '\r') {
+                n = 0;
+                break;
+            }
+            n++;
+        }
+        if (n < 3u || off + n >= bytes || rd8(rdram, base + off + n) != 0) {
+            off++;
+            continue;
+        }
+        char key[MAX_TEXT + 1u];
+        for (uint32_t i = 0; i < n; i++) key[i] = (char)rd8(rdram, base + off + i);
+        key[n] = '\0';
+        if (!find_entry(key)) {
+            off += n + 1u;
+            continue;
+        }
+        uint32_t capacity = n + 1u;
+        while (off + capacity < bytes && capacity < n + 1u + FOLGA_MAX &&
+               rd8(rdram, base + off + capacity) == 0)
+            capacity++;
+        substituir_interno(rdram, 0x80000000u | (base + off), NULL,
+                           capacity, 0);
+        off += capacity;
+    }
+}
+
 int legendas_realocar_recurso(uint8_t* rdram, uint32_t pointer,
                               uint32_t* novo_ponteiro) {
     *novo_ponteiro = 0;
@@ -2101,6 +2393,266 @@ int legendas_realocar_recurso_antes_formatador(uint8_t* rdram,
                                                uint32_t pointer,
                                                uint32_t* novo_ponteiro) {
     return substituir_interno(rdram, pointer, novo_ponteiro, 0, 1);
+}
+
+int legendas_finalizar_pos_formatador(uint8_t* rdram, uint32_t pointer) {
+    uint32_t phys = pointer & 0x1FFFFFFFu;
+    if (!phys || phys >= ARENA_BASE + ARENA_BYTES) return 0;
+
+    int alterou = 0;
+    for (size_t i = 0; i < MAX_TEXT && phys + i < ARENA_BASE + ARENA_BYTES;
+         i++) {
+        uint8_t value = rd8(rdram, phys + (uint32_t)i);
+        if (!value) return alterou;
+        if (value == COD_A_TIL_PRE_FORMATO) {
+            wr8(rdram, phys + (uint32_t)i, COD_A_TIL);
+            alterou = 1;
+        }
+    }
+    return alterou;
+}
+
+void legendas_auditar_texto_consumido(uint8_t* rdram, uint32_t pointer,
+                                      uint32_t caller, int reconhecido) {
+    init_once();
+    if (!g_missing_trace) return;
+
+    uint32_t phys = pointer & 0x1FFFFFFFu;
+    if (!phys || phys >= RDRAM_LIMIT) return;
+
+    /* func_80090E58 pode ser chamada novamente com o ponteiro avancado para
+     * cada glifo. Considere esses enderecos internos parte da frase que acabou
+     * de ser auditada, em vez de gerar todos os seus sufixos como ausencias. */
+    typedef struct { uint32_t base, fim; } audit_range_t;
+    static audit_range_t recentes[64];
+    static uint32_t recente_next;
+    for (uint32_t i = 0; i < 64u; i++)
+        if (phys > recentes[i].base && phys < recentes[i].fim) return;
+
+    char source[MAX_TEXT + 1u];
+    size_t raw = 0, out = 0;
+    int terminou = 0, tem_letra = 0;
+    while (raw < MAX_TEXT && phys + raw < RDRAM_LIMIT) {
+        uint8_t b = rd8(rdram, phys + (uint32_t)raw++);
+        if (!b) { terminou = 1; break; }
+        if (b >= 0xE0u && b <= 0xE2u) {
+            if (phys + raw >= RDRAM_LIMIT) return;
+            uint8_t arg = rd8(rdram, phys + (uint32_t)raw++);
+            size_t control = cart_control_bytes(b, arg);
+            if (control == 4u) {
+                if (raw + 2u > MAX_TEXT || phys + raw + 2u > RDRAM_LIMIT)
+                    return;
+                raw += 2u;
+            }
+            continue;
+        }
+        if (b != '\n' && b != '\r' &&
+            b != COD_A_TIL_PRE_FORMATO && (b < 0x20u || b > 0x7Eu))
+            return;
+        if (out >= MAX_TEXT) return;
+        source[out++] = (char)b;
+        if ((b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')) tem_letra = 1;
+    }
+    recentes[recente_next % 64u].base = phys;
+    recentes[recente_next % 64u].fim = phys + (uint32_t)raw;
+    recente_next++;
+    if (!terminou || !tem_letra || out < 2u) return;
+    while (out && (source[out - 1u] == '\n' || source[out - 1u] == '\r')) out--;
+    source[out] = '\0';
+    if (reconhecido || !out || find_entry(source) ||
+        find_translated_entry(source)) return;
+
+    /* Cadeias formatadas com nomes inseridos deixam de ser uma chave exata.
+     * Isso e normal para uma frase PT-BR ja aplicada ("Josette... você...") e
+     * nao deve poluir a lista de ingles ausente. Classifique por palavras de
+     * funcao, nunca por ASCII puro: o portugues sem acento tambem e ASCII. */
+    char words[MAX_TEXT + 3u];
+    size_t wn = 0;
+    int pt_score = 0, en_score = 0;
+    words[wn++] = ' ';
+    for (size_t i = 0; i < out && wn + 2u < sizeof(words); i++) {
+        uint8_t b = (uint8_t)source[i];
+        char c = 0;
+        if (b >= 'A' && b <= 'Z') c = (char)(b - 'A' + 'a');
+        else if (b >= 'a' && b <= 'z') c = (char)b;
+        else if (b == 0x23u || b == 0x24u || b == 0x25u || b == 0x26u) {
+            c = 'a'; pt_score += 2;
+        } else if (b == 0x2Au || b == 0x2Bu) {
+            c = 'e'; pt_score += 2;
+        } else if (b == 0x2Fu) {
+            c = 'i'; pt_score += 2;
+        } else if (b == 0x3Bu || b == 0x3Cu || b == 0x3Du) {
+            c = 'o'; pt_score += 2;
+        } else if (b == 0x3Eu) {
+            c = 'u'; pt_score += 2;
+        } else if (b == 0x40u) {
+            c = 'c'; pt_score += 2;
+        }
+        if (c) words[wn++] = c;
+        else if (words[wn - 1u] != ' ') words[wn++] = ' ';
+    }
+    if (words[wn - 1u] != ' ') words[wn++] = ' ';
+    words[wn] = '\0';
+    static const char* const en_words[] = {
+        " the ", " and ", " you ", " your ", " is ", " are ", " to ",
+        " of ", " this ", " that ", " what ", " where ", " how ",
+        " why ", " press ", " left ", " right ", " choose ", " item ",
+        " buy ", " sell ", " back ", " day ", " progress ", " please ",
+        " with ", " from ", " have ", " has ", " will ", " would ",
+        " should ", " can ", " not ", " blue ", " green ", " red ",
+        " yellow ", " button ", " oil ", " shop ", " money ", " speed ",
+        " listen ", " carefully ", " yes ", " no "
+    };
+    static const char* const pt_words[] = {
+        " o ", " os ", " a ", " as ", " de ", " do ", " da ", " e ",
+        " em ", " um ", " uma ", " que ", " voce ", " para ", " por ",
+        " nao ", " com ", " se ", " eu ", " ele ", " ela ", " isso ",
+        " isto ", " aqui ", " ali ", " vai ", " ser ", " esta ", " sim ",
+        " muito ", " mais ", " menos ", " botao ", " comprar ", " voltar ",
+        " dia ", " progresso ", " pessoa ", " favor ", " doutor "
+    };
+    for (size_t i = 0; i < sizeof(en_words) / sizeof(en_words[0]); i++)
+        if (strstr(words, en_words[i])) en_score++;
+    for (size_t i = 0; i < sizeof(pt_words) / sizeof(pt_words[0]); i++)
+        if (strstr(words, pt_words[i])) pt_score++;
+    if (en_score <= pt_score || en_score == 0) return;
+
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t i = 0; i < out; i++) hash = (hash ^ (uint8_t)source[i]) * 1099511628211ull;
+    if (!hash) hash = 1;
+    uint32_t slot = (uint32_t)(hash % MISSING_HASH_CAP);
+    for (uint32_t probe = 0; probe < MISSING_HASH_CAP; probe++) {
+        uint32_t index = (slot + probe) % MISSING_HASH_CAP;
+        if (g_missing_hashes[index] == hash) return;
+        if (!g_missing_hashes[index]) {
+            g_missing_hashes[index] = hash;
+            break;
+        }
+        if (probe + 1u == MISSING_HASH_CAP) return;
+    }
+
+    fprintf(g_missing_trace, "0x%06X\t0x%08X\t", phys, caller);
+    for (size_t i = 0; i < out; i++) {
+        unsigned char b = (unsigned char)source[i];
+        if (b == '\n') fputs("\\n", g_missing_trace);
+        else if (b == '\r') fputs("\\r", g_missing_trace);
+        else if (b == '\t') fputs("\\t", g_missing_trace);
+        else if (b < 0x20u || b >= 0x7Fu)
+            fprintf(g_missing_trace, "\\x%02X", b);
+        else fputc(b, g_missing_trace);
+    }
+    fputc('\n', g_missing_trace);
+    fflush(g_missing_trace);
+    g_missing_count++;
+}
+
+static size_t audit_strip_controls(const uint8_t* raw, size_t raw_n,
+                                   char* out, size_t capacity) {
+    size_t in = 0, written = 0;
+    while (in < raw_n && raw[in] && written + 1u < capacity) {
+        uint8_t b = raw[in++];
+        if (b >= 0xE0u && b <= 0xE2u && in < raw_n) {
+            uint8_t arg = raw[in++];
+            size_t control = cart_control_bytes(b, arg);
+            if (control == 4u && in + 2u <= raw_n) in += 2u;
+            continue;
+        }
+        if (b == '\r') continue;
+        if (b == '\n' || b == COD_A_TIL_PRE_FORMATO ||
+            (b >= 0x20u && b <= 0x7Eu))
+            out[written++] = (char)b;
+        else return 0;
+    }
+    while (written && (out[written - 1u] == '\n' ||
+                       out[written - 1u] == '\r')) written--;
+    out[written] = '\0';
+    return written;
+}
+
+static void audit_write_text(FILE* f, const char* text) {
+    for (const uint8_t* p = (const uint8_t*)text; *p; p++) {
+        if (*p == '\n') fputs("\\n", f);
+        else if (*p == '\r') fputs("\\r", f);
+        else if (*p == '\t') fputs("\\t", f);
+        else if (*p < 0x20u || *p >= 0x7Fu) fprintf(f, "\\x%02X", *p);
+        else fputc(*p, f);
+    }
+}
+
+void legendas_auditar_correspondencia(uint8_t* rdram,
+                                      uint32_t source_pointer,
+                                      const uint8_t* source_snapshot,
+                                      size_t source_bytes,
+                                      uint32_t printed_pointer,
+                                      uint32_t caller, int reconhecido) {
+    init_once();
+    if (!g_validation_trace || !source_snapshot || !source_bytes) return;
+    uint32_t source_phys = source_pointer & 0x1FFFFFFFu;
+    uint32_t printed_phys = printed_pointer & 0x1FFFFFFFu;
+    if (!source_phys || printed_phys >= RDRAM_DUMP_BYTES) return;
+
+    typedef struct { uint32_t base, fim; } validation_range_t;
+    static validation_range_t recentes[64];
+    static uint32_t recente_next;
+    for (uint32_t i = 0; i < 64u; i++)
+        if (source_phys > recentes[i].base &&
+            source_phys < recentes[i].fim) return;
+    recentes[recente_next % 64u].base = source_phys;
+    recentes[recente_next % 64u].fim = source_phys + (uint32_t)source_bytes;
+    recente_next++;
+
+    char identified[MAX_TEXT + 1u], consumed[MAX_TEXT + 1u];
+    if (!audit_strip_controls(source_snapshot, source_bytes, identified,
+                              sizeof(identified))) return;
+    uint8_t actual_raw[MAX_TEXT + 1u];
+    size_t actual_n = 0;
+    while (actual_n < MAX_TEXT && printed_phys + actual_n < RDRAM_DUMP_BYTES) {
+        uint8_t b = rdram[(printed_phys + (uint32_t)actual_n) ^ 3u];
+        actual_raw[actual_n++] = b;
+        if (!b) break;
+    }
+    if (!actual_n || actual_raw[actual_n - 1u]) return;
+    if (!audit_strip_controls(actual_raw, actual_n, consumed,
+                              sizeof(consumed))) return;
+
+    subtitle_entry_t* entry = find_entry(identified);
+    subtitle_entry_t* translated_entry = find_translated_entry(identified);
+    const char* status = "sem_catalogo";
+    const char* expected = "";
+    if (entry) {
+        expected = entry->translated_encoded;
+        status = !strcmp(expected, consumed) ? "exato" : "DIVERGENTE";
+    } else if (translated_entry) {
+        expected = translated_entry->translated_encoded;
+        status = !strcmp(expected, consumed) ? "ja_ptbr" : "DIVERGENTE_PT";
+    } else if (reconhecido) {
+        status = "composto_observado";
+    }
+
+    uint64_t hash = 1469598103934665603ull;
+    for (const uint8_t* p = (const uint8_t*)identified; *p; p++)
+        hash = (hash ^ *p) * 1099511628211ull;
+    for (const uint8_t* p = (const uint8_t*)consumed; *p; p++)
+        hash = (hash ^ *p) * 1099511628211ull;
+    if (!hash) hash = 1u;
+    static uint64_t hashes[MISSING_HASH_CAP];
+    uint32_t slot = (uint32_t)(hash % MISSING_HASH_CAP);
+    for (uint32_t probe = 0; probe < MISSING_HASH_CAP; probe++) {
+        uint32_t index = (slot + probe) % MISSING_HASH_CAP;
+        if (hashes[index] == hash) return;
+        if (!hashes[index]) { hashes[index] = hash; break; }
+        if (probe + 1u == MISSING_HASH_CAP) return;
+    }
+
+    fprintf(g_validation_trace, "%s\t0x%06X\t0x%06X\t0x%08X\t",
+            status, source_phys, printed_phys, caller);
+    audit_write_text(g_validation_trace, identified);
+    fputc('\t', g_validation_trace);
+    audit_write_text(g_validation_trace, expected);
+    fputc('\t', g_validation_trace);
+    audit_write_text(g_validation_trace, consumed);
+    fputc('\n', g_validation_trace);
+    fflush(g_validation_trace);
 }
 
 /* O patch Ryu guarda certos dialogos como uma unica cadeia estrutural, mas o
@@ -2140,11 +2692,17 @@ int legendas_realocar_recurso_composto(uint8_t* rdram, uint32_t pointer,
          * posicao relativa entre os fragmentos. */
         if (b >= 0xE0u && b <= 0xE2u && in + 1u < MAX_TEXT) {
             uint8_t arg = rd8(rdram, phys + (uint32_t)in + 1u);
-            hash = (hash ^ arg) * 16777619u;
-            if (out + 2u >= sizeof(saida)) return 0;
-            saida[out++] = b;
-            saida[out++] = arg;
-            in += 2u;
+            size_t control_bytes = cart_control_bytes(b, arg);
+            if (in + control_bytes > MAX_TEXT ||
+                phys + in + control_bytes > RDRAM_LIMIT ||
+                out + control_bytes >= sizeof(saida))
+                return 0;
+            for (size_t i = 0; i < control_bytes; i++) {
+                uint8_t value = rd8(rdram, phys + (uint32_t)(in + i));
+                if (i) hash = (hash ^ value) * 16777619u;
+                saida[out++] = value;
+            }
+            in += control_bytes;
             continue;
         }
 
@@ -2227,8 +2785,12 @@ int legendas_realocar_recurso_composto(uint8_t* rdram, uint32_t pointer,
         }
         in += n;
     }
-    if (viu_quebra && out)
-        out = reflow_dialogue(saida, out, sizeof(saida));
+    if (out) {
+        if (viu_quebra)
+            out = reflow_dialogue_composto(saida, out, sizeof(saida));
+        else
+            legendas_ajustar_quebra_automatica(saida, out);
+    }
     /* A maioria das falas mistas tem dois ou mais fragmentos ingleses. Ha um
      * caso observado em que a segunda linha ja foi traduzida in-place e resta
      * apenas "Ah, right! I should explain how to". Autorize um unico match
@@ -2285,6 +2847,16 @@ static subtitle_entry_t* find_entry(const char* source) {
     for (int index = g_prefix_buckets[bucket]; index >= 0;
          index = g_entries[index].next)
         if (!strcmp(g_entries[index].source, source)) return &g_entries[index];
+    return NULL;
+}
+
+static subtitle_entry_t* find_translated_entry(const char* translated) {
+    if (!*translated) return NULL;
+    uint32_t bucket = prefix_key_text(translated) % HASH_BUCKETS;
+    for (int index = g_translated_buckets[bucket]; index >= 0;
+         index = g_entries[index].next_translated)
+        if (!strcmp(g_entries[index].translated_encoded, translated))
+            return &g_entries[index];
     return NULL;
 }
 

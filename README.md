@@ -30,7 +30,7 @@ continua disponível para diagnóstico, mas RT64 é o padrão.
 - botões digitais, analógico e C-Buttons;
 - Controller Pak e persistência normal do jogo;
 - tradução PT-BR dinâmica, incluindo caracteres acentuados;
-- bookmark seguro por reinício/replay em F2/F4;
+- nove slots de save state instantâneos e persistentes (`Ctrl+Shift+1..9` / `Ctrl+1..9`);
 - janela redimensionável em 4:3 e avanço momentâneo de até 8×.
 
 Este ainda é um projeto de desenvolvimento. É necessário fornecer a própria
@@ -50,13 +50,13 @@ da paginação e do posicionamento pertence à Fase 2.
 | 1. Protótipo funcional | **99%** | Executar o jogo de ponta a ponta, mesmo com imperfeições |
 | 2. Fidelidade de execução | **85%** | Reproduzir vídeo, áudio, timing e interface como o N64 |
 | 3. Extração total | **15%** | Mapear código e recursos sem regiões opacas |
-| 4. Modernização para PC | **45%** | GPU, idiomas, resoluções, recursos e experiência nativa |
+| 4. Modernização para PC | **50%** | GPU, idiomas, resoluções, recursos e experiência nativa |
 
 ### Fase 1 — Protótipo funcional — `99%`
 
 `███████████████████▓` 99%
 
-Concluídos: boot, escalonador por fibers, PI/SI/SP/DP/VI/AI, DMA, tarefas
+Concluídos: boot, escalonador serializável, PI/SI/SP/DP/VI/AI, DMA, tarefas
 gráficas e de áudio, entrada, Controller Pak, persistência, RT64 e execução da
 abertura/cenas já verificadas.
 
@@ -101,13 +101,13 @@ Para chegar a 100%:
   compreendido e documentado;
 - tornar a extração reproduzível a partir de uma ROM fornecida pelo usuário.
 
-### Fase 4 — Modernização para PC — `45%`
+### Fase 4 — Modernização para PC — `50%`
 
-`█████████░░░░░░░░░░░` 45%
+`██████████░░░░░░░░░░` 50%
 
 Já entregues: backend GPU RT64, janela redimensionável, tradução PT-BR
 carregada externamente, caracteres acentuados, captura F5, avanço F11,
-controles de PC, Controller Pak e bookmark por replay.
+controles de PC, Controller Pak e save state portátil.
 
 Para chegar a 100%:
 
@@ -115,7 +115,7 @@ Para chegar a 100%:
 - implementar widescreen e ultrawide sem deformar HUD ou câmeras;
 - permitir pacotes de texturas, sprites e fontes em alta resolução;
 - finalizar a revisão PT-BR e estruturar seleção de idiomas externos;
-- substituir o bookmark experimental por save-states robustos, se viável;
+- oferecer múltiplos slots, miniaturas e interface para save states;
 - criar configuração de controles, áudio, vídeo e Controller Pak;
 - preparar empacotamento, instalador e experiência de release para Windows.
 
@@ -132,6 +132,7 @@ Para chegar a 100%:
 | RSP de áudio | Microcódigo recompilado, executado localmente |
 | Entrada e saves | PIF, analógico, C-Buttons e Controller Pak locais |
 | Texto | Catálogo PT-BR externo aplicado no consumidor do jogo |
+| Estado rápido | RDRAM, threads, continuations e dispositivos versionados |
 
 O Project64 é usado como oráculo comportamental. Resultados analisados são
 consolidados em `analise/`; saídas descartáveis entram somente em `temp/`.
@@ -184,14 +185,17 @@ não carregar, o runtime também retorna automaticamente ao backend CPU.
 
 | Atalho | Função de desenvolvimento |
 |---|---|
-| F2 | Substitui o bookmark rápido por replay |
-| F4 | Reinicia e reproduz as entradas até o bookmark |
+| Ctrl+Shift+1..9 | Grava ou substitui o slot correspondente em disco |
+| Ctrl+1..9 | Restaura o slot correspondente sem reiniciar a janela |
 | F5 | Captura imagem e estado de diagnóstico |
 | F6 | Captura histórico gráfico |
 | F11 pressionado | Avanço nominal de 8×; soltar volta ao normal |
 
-F2/F4 não são save-states tradicionais: o retorno seguro reinicia o runtime e
-reproduz entradas, evitando restaurar RDRAM sobre fibers incompatíveis.
+`Ctrl+Shift+1..9` salva e `Ctrl+1..9` carrega snapshots versionados em
+`sav/bookmarks/slotN.wpstate`. Cada número é um ponto independente; cada arquivo
+inclui os 8 MiB de RDRAM, contextos e continuations das OSThreads e o estado
+lógico de HLE, RSP, PIF e áudio. Áudio hospedado e RT64 são reconstruídos após
+a carga, sem fechar a janela e sem repetir comandos desde o início do jogo.
 
 ---
 
@@ -239,6 +243,8 @@ repositórios não são incorporados ao histórico deste projeto.
 | [RecompFrontend](https://github.com/N64Recomp/RecompFrontend) | Referência para frontend e configuração de recompilações |
 | [o1heap](https://github.com/N64Recomp/o1heap) | Referência de alocador determinístico para runtimes recompilados |
 | [Zelda64Recomp](https://github.com/Zelda64Recomp/Zelda64Recomp) | Referência madura de vídeo, áudio, input e plataforma |
+| [oot-dx](https://github.com/N64DX/oot-dx) | Navegação de depuração no nível do jogo: frame advance, map select e edição de estado |
+| [MegaManX4Recomp](https://github.com/mstan/MegaManX4Recomp) | Referência para snapshot completo, pontos seguros e escalonador restaurável |
 
 ### Wonder Project J2
 

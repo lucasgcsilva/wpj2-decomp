@@ -4,6 +4,10 @@ REM escalonador cooperativo. Por padrao e uma compilacao de liberacao: quando
 REM WPJ2_DEBUG=0, a telemetria nao produz console, arquivos ou custo de I/O.
 REM Para investigar uma regressao especifica, defina WPJ2_VISUAL_DEBUG_BUILD=1
 REM antes de chamar este script.
+REM
+REM Este build continua no escalonador por fibers (sched.c). Save state real
+REM exige as continuacoes serializaveis do wpj2_probe.exe; ver
+REM analise/projeto/savestate_runtime.md.
 call "E:\projetos\project-wonder-j2-decomp\tools\env.cmd"
 cd /d "%PROJ%"
 if "%~1"=="" (
@@ -34,12 +38,12 @@ echo === compilando CPU visual ===
 cl %FLAGS% %INC% "%PROJ%\src\RecompiledFuncsTraced\funcs_*.c" /Fo"%PROJ%\build\objv\\" >nul
 if errorlevel 1 exit /b 1
 echo === compilando runtime visual ===
+REM Fontes comuns em tools\runtime_sources.cmd. Aqui so o escalonador proprio.
+call "%PROJ%\tools\runtime_sources.cmd"
 cl /nologo /c /O2 /std:c17 /EHa /MP /DRECOMP_POLLING %WPJ2_BUILD_MODE% %WPJ2_TRACE_MODE% %INC% ^
-   "%PROJ%\runtime\runtime.c" "%PROJ%\runtime\sched.c" "%PROJ%\runtime\hle.c" ^
-   "%PROJ%\runtime\legendas.c" ^
-   "%PROJ%\runtime\pif.c" "%PROJ%\runtime\mempak.c" "%PROJ%\runtime\rsp.c" "%PROJ%\runtime\video.c" "%PROJ%\runtime\audio.c" ^
-   "%PROJ%\runtime\rt64_backend.c" ^
-   "%PROJ%\runtime\func_table.c" /Fo"%PROJ%\build\objv\\"
+   %RUNTIME_COMUM% ^
+   "%PROJ%\runtime\sched.c" ^
+   /Fo"%PROJ%\build\objv\\"
 if errorlevel 1 exit /b 1
 echo === compilando microcodigo RSP de audio ===
 cl /nologo /c /O2 /std:c++17 /EHsc /MP /DRECOMP_POLLING %WPJ2_BUILD_MODE% %WPJ2_TRACE_MODE% %INC% ^

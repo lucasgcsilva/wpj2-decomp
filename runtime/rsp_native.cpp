@@ -12,6 +12,45 @@ uint8_t dmem[0x1000];
 uint16_t rspReciprocals[512];
 uint16_t rspInverseSquareRoots[512];
 
+static uint32_t g_rsp_dma_wrapped;
+
+static uint32_t wpj2_rsp_dma_length(uint32_t raw_len) {
+    /* SP_{RD,WR}_LEN: bits 0..11 armazenam LEN-1. Os campos COUNT/SKIP nao
+     * sao usados por este microcodigo de audio e eram ignorados pelo helper
+     * anterior tambem. */
+    return (raw_len & 0xFFFu) + 1u;
+}
+
+extern "C" void wpj2_rsp_dma_read_safe(uint8_t* rdram, uint32_t dmem_addr,
+                                        uint32_t dram_addr, uint32_t raw_len) {
+    uint32_t length = wpj2_rsp_dma_length(raw_len);
+    uint32_t memory = dmem_addr & 0xFFFu;
+    dram_addr &= 0xFFFFF8u;
+    if (memory + length > 0x1000u && g_rsp_dma_wrapped++ < 8u) {
+        std::fprintf(stderr,
+                     "[audio-rsp] DMA read com wrap: dmem=%04X len=%X dram=%06X\n",
+                     dmem_addr, length, dram_addr);
+    }
+    for (uint32_t i = 0; i < length; i++)
+        RSP_MEM_B(0, (memory + i) & 0xFFFu) =
+            MEM_B(0, (int64_t)(int32_t)(dram_addr + i + 0x80000000u));
+}
+
+extern "C" void wpj2_rsp_dma_write_safe(uint8_t* rdram, uint32_t dmem_addr,
+                                         uint32_t dram_addr, uint32_t raw_len) {
+    uint32_t length = wpj2_rsp_dma_length(raw_len);
+    uint32_t memory = dmem_addr & 0xFFFu;
+    dram_addr &= 0xFFFFF8u;
+    if (memory + length > 0x1000u && g_rsp_dma_wrapped++ < 8u) {
+        std::fprintf(stderr,
+                     "[audio-rsp] DMA write com wrap: dmem=%04X len=%X dram=%06X\n",
+                     dmem_addr, length, dram_addr);
+    }
+    for (uint32_t i = 0; i < length; i++)
+        MEM_B(0, (int64_t)(int32_t)(dram_addr + i + 0x80000000u)) =
+            RSP_MEM_B(0, (memory + i) & 0xFFFu);
+}
+
 extern RspExitReason wpj2_audio_rsp(uint8_t* rdram, uint32_t ucode_addr);
 
 /* Copia local da inicializacao de constantes do librecomp. Importar rsp.cpp

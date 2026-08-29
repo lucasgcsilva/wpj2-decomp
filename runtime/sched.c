@@ -300,7 +300,7 @@ static void CALLBACK scheduler_loop(void* param) {
                fiber principal apos dez segundos fazia a instrucao seguinte ao
                __osDispatchThread continuar fora do contexto salvo, justamente
                durante as trocas automaticas da abertura. */
-            g_idle_rounds += hle_deliver_events(rdram);
+            g_idle_rounds += hle_deliver_events(rdram) != 0;
             if (g_idle_rounds == MAX_IDLE_ROUNDS) {
                 printf("  [sched] fila vazia por %d retraces; permanecendo ocioso\n",
                        MAX_IDLE_ROUNDS);

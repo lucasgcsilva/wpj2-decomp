@@ -73,9 +73,16 @@ def main():
         with open(sp, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
 
-        out = ['#include "trace.h"\n']
+        out = []
+        trace_include_inserted = False
         current_function = None
         for line in lines:
+            # trace.h também pode redefinir sondas residuais do C gerado. Ele
+            # precisa vir depois de stdio.h; antes disso o macro `printf`
+            # alteraria a própria declaração da CRT.
+            if not trace_include_inserted and not line.startswith("#include "):
+                out.append('#include "trace.h"\n')
+                trace_include_inserted = True
             m = SIG.match(line)
             if m:
                 current_function = m.group(1)
@@ -92,6 +99,9 @@ def main():
                 if current_function not in NO_POLL_FUNCTIONS:
                     out.append("    RECOMP_POLL();\n")
                     labels += 1
+
+        if not trace_include_inserted:
+            out.append('#include "trace.h"\n')
 
         with open(dp, "w", encoding="utf-8") as f:
             f.writelines(out)

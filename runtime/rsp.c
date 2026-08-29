@@ -28,6 +28,7 @@
 #include "rt64_backend.h"
 
 #define SP_STATUS_ADDR   0xA4040010u
+#define SP_PC_ADDR       0xA4080000u
 
 /* Bits de leitura. */
 #define ST_HALT          (1u << 0)
@@ -190,6 +191,16 @@ static uint64_t g_gfx_raster_last_us = 0;
 static uint64_t g_gfx_raster_peak_us = 0;
 static uint64_t g_gfx_raster_total_us = 0;
 static uint64_t g_gfx_raster_samples = 0;
+/* Histograma barato do custo do backend. Permanece sempre em memória, mas só
+ * imprime ocorrências individuais quando WPJ2_RT64_PERF está ativo. Assim a
+ * própria instrumentação não altera a cadência do perfil normal. */
+static uint64_t g_gfx_raster_buckets[7]; /* <1, <2, <4, <8, <16, <33, >=33 ms */
+static uint64_t g_gfx_raster_slow_logged;
+static LARGE_INTEGER g_gfx_task_prev, g_gfx_task_freq;
+static uint64_t g_gfx_task_interval_buckets[5]; /* <10, <20, <25, <40, >=40 ms */
+static uint64_t g_gfx_task_interval_logged;
+static uint64_t g_gfx_fast_skipped = 0;
+static unsigned g_gfx_fast_phase = 0;
 /* Mesmo tipo de telemetria para a AList: o chiado e a cadencia precisam ser
  * medidos separadamente do raster 3D para nao se atribuir ao video um atraso
  * que venha do mixer de audio. */
@@ -216,6 +227,30 @@ static uint32_t g_task_done_first = 0, g_task_done_count = 0;
 static uint32_t g_task_done_peak = 0;
 static uint64_t g_task_done_lost = 0;
 
+static void rsp_enqueue_task_done(int type) {
+    if (g_task_done_count < TASK_DONE_CAP) {
+        uint32_t at = (g_task_done_first + g_task_done_count) % TASK_DONE_CAP;
+        g_task_done[at] = (uint8_t)type;
+        g_task_done_count++;
+        if (g_task_done_count > g_task_done_peak) g_task_done_peak = g_task_done_count;
+    } else {
+        g_task_done_lost++;
+        if (g_task_done_lost == 1) {
+            printf("  [rsp] fila de conclusoes cheia; proximas tarefas serao descartadas\n");
+            fflush(stdout);
+        }
+    }
+}
+
+static void rsp_poll_rt64_completions(void) {
+    while (rt64_backend_take_completed()) rsp_enqueue_task_done(1);
+}
+
+void rsp_sync_rt64_completions(void) {
+    rt64_backend_sync();
+    rsp_poll_rt64_completions();
+}
+
 /* Contagem por tipo de tarefa.
  *
  * Antes eu so imprimia o tipo das quatro primeiras tarefas, e concluia dali que
@@ -234,6 +269,7 @@ uint64_t rsp_tasks_tipo(int t) { return (t >= 0 && t < TIPO_MAX) ? g_por_tipo[t]
  * posterga DP para a proxima troca de contexto. Uma tarefa de audio nao usa o
  * RDP e nao gera DP. */
 int rsp_take_task_done(void) {
+    rsp_poll_rt64_completions();
     if (g_task_done_count == 0) return 0;
     int d = g_task_done[g_task_done_first];
     g_task_done_first = (g_task_done_first + 1) % TASK_DONE_CAP;
@@ -245,11 +281,58 @@ int rsp_take_task_done(void) {
  * estiver cheia. Espiar antes de remover evita perder uma interrupcao de RSP
  * por uma condicao de corrida do host. */
 int rsp_peek_task_done(void) {
+    rsp_poll_rt64_completions();
     return g_task_done_count ? g_task_done[g_task_done_first] : 0;
 }
 
 static void publish(uint8_t* rdram) {
     MEM_W(0, (gpr)(int32_t)SP_STATUS_ADDR) = (int32_t)g_status;
+}
+
+void rsp_state_capture(wpj2_rsp_state_image* image) {
+    if (!image) return;
+    memset(image, 0, sizeof(*image));
+    memcpy(image->spmem, g_spmem, sizeof(g_spmem));
+    memcpy(image->task_done, g_task_done, sizeof(g_task_done));
+    image->status = g_status;
+    image->task_done_first = g_task_done_first;
+    image->task_done_count = g_task_done_count;
+}
+
+void rsp_state_restore(uint8_t* rdram, const wpj2_rsp_state_image* image) {
+    if (!image || image->task_done_first >= TASK_DONE_CAP ||
+        image->task_done_count > TASK_DONE_CAP) return;
+    memcpy(g_spmem, image->spmem, sizeof(g_spmem));
+    memcpy(g_task_done, image->task_done, sizeof(g_task_done));
+    g_status = image->status;
+    g_task_done_first = image->task_done_first;
+    g_task_done_count = image->task_done_count;
+    publish(rdram);
+}
+
+/* __osSpSetPc e __osSpDeviceBusy precisam observar o estado do dispositivo,
+ * nao a pagina MMIO usada como espelho. Numa execucao longa da loja o espelho
+ * terminou com bits DMA/IO ocupados e osSpTaskLoad ficou preso antes de
+ * submeter a proxima tarefa; imagem e audio pararam juntos. Isso nao pode ser
+ * uma DMA real pendente: func_800CD060 executa a copia sincronicamente e
+ * devolve somente depois de conclui-la.
+ *
+ * A referencia em libreultra confirma os contratos: __osSpSetPc so aceita a
+ * escrita com HALT ativo e __osSpDeviceBusy consulta exclusivamente
+ * DMA_BUSY/DMA_FULL/IO_FULL. Nesta ponte esses tres bits nunca ficam pendentes.
+ */
+void func_800CD020(uint8_t* rdram, recomp_context* ctx) {
+    if (!(g_status & ST_HALT)) {
+        ctx->r2 = (gpr)(int32_t)-1;
+        return;
+    }
+    MEM_W(0, (gpr)(int32_t)SP_PC_ADDR) = (int32_t)(uint32_t)ctx->r4;
+    ctx->r2 = 0;
+}
+
+void func_800CD0F0(uint8_t* rdram, recomp_context* ctx) {
+    (void)rdram;
+    ctx->r2 = 0;
 }
 
 /* __osSpSetStatus(u32 value). Cada par de bits da escrita e "tirar" e "por". */
@@ -277,6 +360,26 @@ void func_800CD010(uint8_t* rdram, recomp_context* ctx) {
         if (type == 2) {
             run_acmd_list(rdram, lista, sp_word(TASK_OFFSET + 0x34));
         } else if (type == 1 && lista && lista < 0x800000u) {
+            LARGE_INTEGER task_now;
+            QueryPerformanceCounter(&task_now);
+            if (!g_gfx_task_freq.QuadPart) QueryPerformanceFrequency(&g_gfx_task_freq);
+            if (g_gfx_task_prev.QuadPart && g_gfx_task_freq.QuadPart) {
+                double interval_ms = (double)(task_now.QuadPart - g_gfx_task_prev.QuadPart) *
+                                     1000.0 / (double)g_gfx_task_freq.QuadPart;
+                unsigned ib = interval_ms < 10.0 ? 0u : interval_ms < 20.0 ? 1u :
+                              interval_ms < 25.0 ? 2u : interval_ms < 40.0 ? 3u : 4u;
+                g_gfx_task_interval_buckets[ib]++;
+                const char* perf_interval = getenv("WPJ2_RT64_PERF");
+                if (perf_interval && *perf_interval && *perf_interval != '0' &&
+                    interval_ms >= 25.0 && g_gfx_task_interval_logged < 96u) {
+                    printf("[gfx-gap] task=%llu intervalo=%.3fms func=%08X\n",
+                           (unsigned long long)(g_gfx_listas + 1u), interval_ms,
+                           trace_last_func());
+                    fflush(stdout);
+                    g_gfx_task_interval_logged++;
+                }
+            }
+            g_gfx_task_prev = task_now;
             uint32_t bytes = sp_word(TASK_OFFSET + 0x34);
             if (bytes < g_gfx_lista_min) g_gfx_lista_min = bytes;
             if (bytes > g_gfx_lista_max) g_gfx_lista_max = bytes;
@@ -285,7 +388,17 @@ void func_800CD010(uint8_t* rdram, recomp_context* ctx) {
                quantas vezes, e para quais buffers. A primeira lista tambem vai
                inteira para arquivo, sublistas incluidas. */
             FILE* saida = NULL;
-            if (g_rsp_debug && g_gfx_listas == 0) {
+            static unsigned menu_dl_dumpadas;
+            const char* dump_menu = getenv("WPJ2_DUMP_MENU_DL");
+            int16_t estado_dl = (int16_t)rsp_rdram16(rdram, 0x001A7234u);
+            int16_t subestado_dl = (int16_t)rsp_rdram16(rdram, 0x001A723Cu);
+            if (dump_menu && *dump_menu && *dump_menu != '0' &&
+                estado_dl == 11 && subestado_dl == 24 && menu_dl_dumpadas < 32u) {
+                char nome[256];
+                snprintf(nome, sizeof(nome), "%smenu_dl_%03u.txt", g_prefixo,
+                         menu_dl_dumpadas++);
+                saida = fopen(nome, "w");
+            } else if (g_rsp_debug && g_gfx_listas == 0) {
                 char nome[256];
                 snprintf(nome, sizeof(nome), "%sdisplaylist.txt", g_prefixo);
                 saida = fopen(nome, "w");
@@ -296,7 +409,7 @@ void func_800CD010(uint8_t* rdram, recomp_context* ctx) {
                 g_gfx_lista_grande_dumpada = 1;
             }
             g_gfx_listas++;
-            if (g_rsp_debug) andar_dl(rdram, lista, 0, saida); /* conta/documenta */
+            if (g_rsp_debug || saida) andar_dl(rdram, lista, 0, saida); /* conta/documenta */
             if (saida) fclose(saida);
             /* A matriz param=02 no nivel superior de 12/50 e a transformacao
              * raiz observada no Project64. Registrar 18 amostras locais
@@ -333,11 +446,33 @@ void func_800CD010(uint8_t* rdram, recomp_context* ctx) {
             /* O backend alternativo recebe a mesma GBI/OSTask da ROM. Se a
              * DLL não existir ou rejeitar a lista, o rasterizador CPU continua
              * sendo fallback por tarefa e mantém o executável recuperável. */
-            int desenhou_rt64 = rt64_backend_submit(
-                rdram, g_spmem, lista, bytes,
-                sp_word(TASK_OFFSET + 0x10),
-                sp_word(TASK_OFFSET + 0x18));
-            if (!desenhou_rt64) desenhar_dl(rdram, lista, 0);
+            /* Fast-forward com frame skip real. F11 conserva uma imagem em
+             * oito para ainda servir como navegacao visual. O replay F4 nao
+             * precisa exibir o caminho: omite 100% da rasterizacao ate o poll
+             * marcado. A ROM continua recebendo SP/DP para TODAS as tarefas;
+             * portanto logica, audio e estado emulado seguem sendo executados. */
+            int pular_grafico = 0;
+            if (hle_replay_turbo_active()) {
+                pular_grafico = 1;
+            } else if (hle_navigation_turbo_active()) {
+                pular_grafico = (g_gfx_fast_phase++ & 7u) != 0u;
+            } else {
+                g_gfx_fast_phase = 0;
+            }
+            int desenhou_rt64 = pular_grafico;
+            if (pular_grafico) {
+                g_gfx_fast_skipped++;
+            } else {
+                perf_timeline_mark("gfx_begin", (uint32_t)g_gfx_listas, bytes);
+                int submit_result = rt64_backend_submit(
+                    rdram, g_spmem, lista, bytes,
+                    sp_word(TASK_OFFSET + 0x10),
+                    sp_word(TASK_OFFSET + 0x18));
+                perf_timeline_mark("gfx_end", (uint32_t)g_gfx_listas,
+                                   (uint32_t)submit_result);
+                desenhou_rt64 = submit_result != 0;
+                if (!desenhou_rt64) desenhar_dl(rdram, lista, 0);
+            }
             QueryPerformanceCounter(&raster_fim);
             if (g_cimg_addr && capturar_gfx_atual()) {
                 char rot[96];
@@ -362,6 +497,20 @@ void func_800CD010(uint8_t* rdram, recomp_context* ctx) {
                 g_gfx_raster_total_us += us;
                 g_gfx_raster_samples++;
                 if (us > g_gfx_raster_peak_us) g_gfx_raster_peak_us = us;
+                unsigned bucket = us < 1000u ? 0u : us < 2000u ? 1u :
+                                  us < 4000u ? 2u : us < 8000u ? 3u :
+                                  us < 16000u ? 4u : us < 33000u ? 5u : 6u;
+                g_gfx_raster_buckets[bucket]++;
+                const char* perf = getenv("WPJ2_RT64_PERF");
+                if (perf && *perf && *perf != '0' && us >= 8000u &&
+                    g_gfx_raster_slow_logged < 96u) {
+                    printf("[gfx-slow] task=%llu dl=%08X bytes=%u ucode=%08X data=%08X custo=%.3fms\n",
+                           (unsigned long long)g_gfx_listas, lista, bytes,
+                           sp_word(TASK_OFFSET + 0x10),
+                           sp_word(TASK_OFFSET + 0x18), (double)us / 1000.0);
+                    fflush(stdout);
+                    g_gfx_raster_slow_logged++;
+                }
             }
             g_rastrear_camera_12 = 0;
             /* A contagem da camera e a mesma unidade observada no dump do
@@ -474,19 +623,7 @@ void func_800CD010(uint8_t* rdram, recomp_context* ctx) {
         g_status |= ST_HALT | ST_BROKE;
         g_tasks++;
         g_por_tipo[type < TIPO_MAX ? type : 0]++;
-        if (g_task_done_count < TASK_DONE_CAP) {
-            uint32_t at = (g_task_done_first + g_task_done_count) % TASK_DONE_CAP;
-            g_task_done[at] = (uint8_t)type;
-            g_task_done_count++;
-            if (g_task_done_count > g_task_done_peak)
-                g_task_done_peak = g_task_done_count;
-        } else {
-            g_task_done_lost++;
-            if (g_task_done_lost == 1) {
-                printf("  [rsp]  fila de conclusoes cheia; proximas tarefas serao descartadas\n");
-                fflush(stdout);
-            }
-        }
+        rsp_enqueue_task_done((int)type);
         if (g_tasks <= 4) {
             printf("  [rsp]  tarefa %llu (tipo %u) executada\n",
                    (unsigned long long)g_tasks, type);
@@ -2872,6 +3009,26 @@ void rsp_gfx_report(const char* prefixo) {
     printf("fila de conclusoes RSP : atual=%u pico=%u/%u descartadas=%llu\n",
            g_task_done_count, g_task_done_peak, TASK_DONE_CAP,
            (unsigned long long)g_task_done_lost);
+    printf("tempo backend grafico  : amostras=%llu media=%.3f ms pico=%.3f ms ultimo=%.3f ms\n",
+           (unsigned long long)g_gfx_raster_samples,
+           g_gfx_raster_samples ?
+               (double)g_gfx_raster_total_us / (double)g_gfx_raster_samples / 1000.0 : 0.0,
+           (double)g_gfx_raster_peak_us / 1000.0,
+           (double)g_gfx_raster_last_us / 1000.0);
+    printf("histograma backend (ms): <1=%llu <2=%llu <4=%llu <8=%llu <16=%llu <33=%llu >=33=%llu\n",
+           (unsigned long long)g_gfx_raster_buckets[0],
+           (unsigned long long)g_gfx_raster_buckets[1],
+           (unsigned long long)g_gfx_raster_buckets[2],
+           (unsigned long long)g_gfx_raster_buckets[3],
+           (unsigned long long)g_gfx_raster_buckets[4],
+           (unsigned long long)g_gfx_raster_buckets[5],
+           (unsigned long long)g_gfx_raster_buckets[6]);
+    printf("intervalos entre GFX   : <10=%llu <20=%llu <25=%llu <40=%llu >=40=%llu\n",
+           (unsigned long long)g_gfx_task_interval_buckets[0],
+           (unsigned long long)g_gfx_task_interval_buckets[1],
+           (unsigned long long)g_gfx_task_interval_buckets[2],
+           (unsigned long long)g_gfx_task_interval_buckets[3],
+           (unsigned long long)g_gfx_task_interval_buckets[4]);
     printf("rasterizador            : %llu retangulo(s), %llu pixel(es) pintado(s),"
            " %llu comando(s) ignorado(s)\n", (unsigned long long)g_rects,
            (unsigned long long)g_pixels_pintados, (unsigned long long)g_ignorados);
@@ -2970,6 +3127,8 @@ void rsp_gfx_report(const char* prefixo) {
     printf("comandos graficos       : %llu em %llu lista(s), %llu cortadas por"
            " profundidade\n", (unsigned long long)g_gfx_cmds,
            (unsigned long long)g_gfx_listas, (unsigned long long)g_gfx_profundas);
+    printf("quadros descartados F11 : %llu\n",
+           (unsigned long long)g_gfx_fast_skipped);
     printf("tamanho das listas GFX  : %u..%u bytes\n",
            g_gfx_lista_min == UINT32_MAX ? 0 : g_gfx_lista_min, g_gfx_lista_max);
     printf("alvos de desenho (SETCIMG): ");

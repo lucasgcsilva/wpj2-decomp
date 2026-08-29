@@ -33,8 +33,14 @@ def decode_record(data: bytes, start: int) -> tuple[str, int, str] | None:
         if value in CONTROL_BYTES:
             if pos + 1 >= end:
                 return None
-            controls.append(f"{len(chars)}:{value:02X}{data[pos + 1]:02X}")
-            pos += 2
+            argument = data[pos + 1]
+            size = 4 if value == 0xE2 and argument == 0x06 else 2
+            if pos + size > end:
+                return None
+            controls.append(
+                f"{len(chars)}:" + "".join(f"{byte:02X}" for byte in data[pos:pos + size])
+            )
+            pos += size
             continue
         if value in (0x0A, 0x0D) or 0x20 <= value <= 0x7E:
             chars.append(chr(value))

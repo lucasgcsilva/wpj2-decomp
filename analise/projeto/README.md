@@ -23,6 +23,10 @@ Resultados produzidos pelo runtime deste projeto e já interpretados.
   baseada em RT64, com comparação de cobertura e plano de adoção da GPU.
 - `integracao_rt64.md`: arquitetura e validação do backend híbrido definitivo,
   com RT64 apenas no vídeo e os demais subsistemas preservados localmente.
+- `checkpoints_estado.md`: comparação oot-dx/MegaManX4Recomp, causa da
+  instabilidade do bookmark e requisitos para um save state completo.
+- `savestate_runtime.md`: implementação e validação do snapshot versionado sem
+  fibers, incluindo continuations, dispositivos, RT64 e cargas repetidas.
 - `legendas/`: duas referências visuais usadas para localizar os buffers e o
   controle de cor da primeira caixa de diálogo.
 

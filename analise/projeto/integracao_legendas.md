@@ -371,14 +371,13 @@ aspas e espaços estruturais. A primeira passagem encontrou 98 chaves; depois
 da promoção de palavras, ações, nomes e variantes com espaços, o resultado é
 **zero fonte extraída sem chave canônica**, com 5.886 chaves ativas.
 
-O lixo sobreposto das falas longas não vinha de uma tradução ausente. O dump
-da arena continha a frase correta, mas a linha PT-BR podia ficar mais larga em
-pixels que a inglesa. O motor fazia uma quebra automática e em seguida lia a
-quebra explícita herdada do inglês, executando duas rolagens sobre o mesmo
-framebuffer. Mensagens compostas agora têm suas quebras de layout recalculadas
-com margem de 38 glifos, depois de `vsprintf`; controles `E0/E1/E2` continuam
-no fluxo e ocupam largura zero. O teste compara o conteúdo ignorando apenas a
-posição das quebras, exige linhas de no máximo 38 glifos e passou.
+O dump da arena provou que a fala longa já estava correta em PT-BR. A tentativa
+feita nessa data atribuía o lixo a uma dupla quebra e recalculava todas as
+linhas com margem de 38 glifos. A validação interativa posterior rejeitou essa
+solução: ela própria gerava sobreposição e deslocava controles. A regra vigente
+está documentada em “Refluxo de palavras na caixa inferior”: quebras explícitas
+são imutáveis e somente uma quebra automática no meio da palavra é antecipada
+para o espaço anterior, sem alterar o tamanho da cadeia.
 
 Essa substituição deve permanecer estritamente limitada à faixa de ROM
 `0x0068B8E0..0x0068BF48`. Aplicá-la genericamente em toda cópia de
@@ -430,3 +429,230 @@ fase tardia. No replay completo de 175 segundos, o ponto antigo parava em
 10.127 tarefas, com a thread principal aguardando normalmente em
 `0x800CC98C`. O log confirmou tanto os adiamentos quanto traduções tardias da
 mesma sequência de Geppetto.
+
+### Representação intermediária e controles longos — 25/08/2026
+
+Os F5 `001` e `004` mostraram uma limitação da estratégia de adiamento: falas
+com variável no meio (`E0`) chegavam à rota tardia já com `Josette` expandida
+e deixavam de ser iguais à chave canônica. Adiar a frase inteira portanto
+evitava o congelamento, mas também a mantinha em inglês.
+
+A solução passou a ser uma representação por fase. Antes de `func_8008EDA4`,
+somente o `ã` vindo de UTF-8 é codificado como `0x7F`, byte ausente do banco
+ASCII Ryu. Depois do formatador, `func_80090E58` o converte para `0x25`, quando
+esse byte já significa o glifo e não o operador `%`. O texto, variáveis,
+pausas e animação continuam percorrendo a rota original; não há sobreposição
+no framebuffer nem busca por uma frase específica. Slots reutilizados são
+reescritos na forma pré-formatador antes de nova publicação. A rota precoce
+também reconhece a cadeia PT-BR completa já codificada: isso cobre blocos
+in-place que atravessam o formatador novamente depois de `0x25` ter sido
+restaurado, evitando reexpor `%` numa segunda passagem.
+
+O F5 `002` revelou ainda o controle de quatro bytes `E2 06 80 10`, que muda a
+cadência no meio de `Don't be so sel...fish.`. O parser antigo consumia apenas
+`E2 06`, encontrava `0x80` como se fosse texto e rejeitava o recurso inteiro.
+Runtime e extrator agora conhecem o tamanho variável do controle, preservam os
+quatro bytes e usam a chave normalizada `Don't be so sel...fish.`. A entrada
+foi promovida ao catálogo como `Não seja tão ego...ísta.`. O mesmo teste
+unitário exige tradução, `ã` protegido e a sequência de animação intacta.
+
+O F5 `003` era dado incorreto no catálogo: `Doctor...` ainda apontava para si
+mesmo. A tradução ativa e o catálogo canônico passaram a usar `Doutor...`.
+
+O F5 `005` não confirmou colisão de cache. No dump, a fila circular em
+`0x1879D0` aponta para `0x804100C4`, que contém corretamente `Tenho certeza
+que você será gentilmente vigiado...`. A tela ainda conservava a frase
+anterior em `0x2B87E0`, enquanto o diálogo estava no estado intermediário
+`0x2D`; a nova mensagem ainda não havia sido copiada para o buffer visual.
+Esse caso deve ser revalidado depois das correções acima, sem um remendo de
+ponteiro que contrariaria o estado observado.
+
+### Revalidação sob F11 — apresentação atrasada, não tradução repetida
+
+O F5 seguinte pareceu repetir `Ali, uma pessoa chamada "Player-san"...`, mas
+os três níveis de estado divergiam de forma conclusiva:
+
+- a janela RT64 ainda apresentava a frase antiga;
+- o buffer rasterizado em `0x2B87E0` também continha a frase antiga;
+- a fila circular já apontava para `0x80410028`, com `Eh? Mas por que!?`.
+
+A captura ocorreu em `retrace=33727`, mas havia somente 7.295 tarefas gráficas:
+o F11 adiantou a máquina da ROM muito além do último quadro apresentado. Isso
+explica tanto a suposta repetição quanto o F5 anterior em estado `0x2D`; alterar
+catálogo, cache ou ponteiro nesse ponto seria corrigir o subsistema errado.
+
+O F11 passou a usar frame skip explícito: a ROM recebe normalmente todas as
+conclusões SP/DP, porém sete de cada oito listas deixam de ser rasterizadas e
+nenhum quadro é apresentado enquanto a tecla está pressionada. Diálogos,
+pausas e transições continuam avançando na máquina original; ao soltar, a
+próxima tarefa completa volta à janela. O estado físico da tecla também é
+consultado, evitando turbo preso quando uma reconstrução da swapchain perde o
+`WM_KEYUP` durante a transição 3D/2D.
+
+### Repetição real — limite de 4 MB do SysMem_DmaCopy
+
+A captura seguinte, já em cadência normal, separou o defeito restante. O
+buffer vivo continuava em `Ali, uma pessoa...`, enquanto a fila já havia
+consumido `Eh? Mas por que!?` e apontava para `Dr. Geppetto: Peço desculpas...`.
+O slot fixo `0x80410028` continha corretamente a segunda tradução: catálogo,
+arena e publicação do ponteiro estavam certos.
+
+O consumidor em `func_80030AC8` copia cada ponteiro da fila para
+`D_801705B0` chamando `SysMem_DmaCopy` (`func_800BD218`). O código original
+recusa explicitamente origens a partir de `0x80400000`, pois o N64 desta ROM
+anuncia somente 4 MB. Nossa arena PT-BR começa exatamente ali. A cópia falhava,
+a fila avançava e o framebuffer textual conservava a mensagem anterior.
+
+O wrapper já existente de `SysMem_DmaCopy` agora reconhece exclusivamente a
+arena reservada pelo runtime (`0x80400000..0x806FFFFF`) e copia dela para a
+RDRAM hospedada preservando a ordem lógica dos bytes MIPS. As demais origens
+continuam no corpo original. É uma correção geral para toda tradução
+realocada, não uma exceção para esta fala.
+
+### Controles de variável após quebra de linha
+
+Os F5 de 25/08 mostraram `Josette` inserida dentro de `preocupe` e `mim`. A
+palavra não fazia parte da tradução: `E0 01` é o marcador do nome da
+protagonista e, nos dois recursos ingleses, fica na coluna zero da segunda
+linha. O mapeamento antigo preservava apenas a proporção do deslocamento bruto;
+uma primeira linha PT-BR maior empurrava o controle para dentro da frase.
+
+O realocador agora preserva número da linha e coluna para controles que vêm
+depois de uma quebra. O teste cobre diretamente `Hoh hoh... don't worry,` e
+exige `\n E0 01` na saída. Isso vale para qualquer variável estrutural em
+mensagens multilinha, não somente para o nome Josette.
+
+O terceiro F5 continha `Live your life to the fullest.` com três comandos
+animados `E2 06`. A cadeia estava numa região dinâmica não coberta pelo
+extrator histórico; foi catalogada manualmente pelo conteúdo normalizado como
+`Viva sua vida plenamente.`, conservando todos os quatro bytes de cada comando.
+
+Foi iniciada também uma auditoria conservadora de gênero. Correções inequívocas
+dirigidas à protagonista foram sincronizadas nos dois catálogos (`guiá-la`,
+`vigiada`, `Bem-vinda`, `sozinha`, `preparada`, `interessada`, `assustada`,
+entre outras). Formas dependentes de contexto não foram trocadas em massa,
+pois o mesmo adjetivo pode pertencer a personagens masculinos em outras cenas.
+
+### Refluxo de palavras na caixa inferior
+
+O F5 seguinte exibiu `vig`/`iada`, embora o buffer vivo contivesse a frase
+inteira sem quebra. Logo, a divisão vinha do limite automático do formatador
+inglês, que corta ao ultrapassar a largura sem retornar ao espaço anterior.
+
+A primeira tentativa estava errada: removia quebras existentes e recalculava
+toda a cadeia com um limite fixo. Em execução isso gerou uma linha adicional,
+texto sobreposto e deslocou `E0 01` (Josette) para dentro de outra palavra. A
+tentativa foi removida.
+
+A captura dos quatro F5 seguintes mostrou que a largura não é expressa em
+quantidade de glifos: a fonte Ryu é proporcional (`i/l` avançam 2 px,
+`m/w` e a maioria das maiúsculas, 8 px) e a caixa quebra perto de 232 px. Nos
+quatro casos, a tradução ultrapassava essa largura antes de alcançar o `\n` do
+fragmento inglês; o motor criava uma quebra automática e o `\n` logo seguinte
+executava outra rolagem sobre o mesmo framebuffer. Em dois recursos, somente
+espaços de preenchimento antes do delimitador já causavam o estouro.
+
+A regra vigente usa os avanços observados no compositor nativo. Sem quebra
+explícita, troca o espaço anterior ao estouro por `\n`, sem mudar o tamanho.
+Em mensagens compostas com `\n`, remove somente preenchimento imediatamente
+anterior ao delimitador; se a linha ainda exceder 232 px, move a mesma quebra
+para o espaço anterior e transforma a posição antiga em espaço. Portanto não
+é criada uma segunda quebra e a sequência dos controles E0/E1/E2 é mantida.
+O teste cobre preservação de uma quebra que já cabe, quebra automática e a
+fala real `Certo, vou começar!...`, que agora divide antes de `Bird`.
+
+A captura seguinte isolou um caso diferente: a instrução começava em `y=0`,
+continuava em `y=14` e a palavra final `botão!` voltava para `y=0`, cobrindo a
+primeira linha. O byte `0A` no fim desse recurso não era uma terceira linha
+disponível; era o terminador visual da fala. O refluxo estava deslocando esse
+último delimitador para dentro do texto e, assim, solicitava uma terceira
+linha numa caixa nativa de duas linhas.
+
+O compositor agora nunca reaproveita o `0A` terminal. Se a última linha ainda
+exceder 232 px, a tradução composta precisa ser condensada dentro das duas
+linhas em vez de inventar paginação. Os quatro fragmentos dessa instrução
+também foram corrigidos e reduzidos (`Para carregar algo, coloque Bird sobre`
+e `ele e segure o Botão Amarelo!`), removendo os resíduos ingleses `it` e
+`press`. O teste unitário reproduz os controles E1 e exige exatamente duas
+linhas mais o terminador final.
+
+### `Day` e `Progress`: nova classificação
+
+A hipótese antiga de palavras integralmente pré-rasterizadas não é suficiente.
+`wonder-source/src/code/code_8F1A0.c` mostra que `func_80094230` compõe objetos
+e glifos no atlas CI8 antes dos TEXRECTs. A tela de diário não mantém as duas
+palavras como ASCII na RDRAM, mas isso não implica que sejam uma única imagem.
+
+O F5 passou a exportar `glifos_f5_NNN.tsv`. Uma repetição com ring de 524.288
+entradas conservou os 144.184 objetos desde o início da execução; mesmo assim,
+as sequências de `Day` e `Progress` não aparecem. Isso encerra a hipótese de
+que o ring curto apenas as tivesse sobrescrito.
+
+O rastreio de `Spi_DecompressAsset` isolou o recurso adicional do patch Ryu em
+ROM `0x0068E100` (0x6B68 bytes comprimidos, 0x282E0 descomprimidos). A ROM
+japonesa não o carrega e usa, no mesmo espaço, o banco grande de fonte JP.
+Portanto os dois rótulos pertencem ao recurso gráfico introduzido pela tradução
+inglesa, e não à composição normal de `func_80094230`.
+
+O F5 normal continua a exportar `glifos_f5_NNN.tsv`, com os objetos recentes,
+coordenadas, avanço, chamador e estado. O ring só é ativado por `TESTAR.bat` e
+não afeta builds de apresentação. A próxima captura da tela de diário permite
+identificar a sequência e o recurso produtor; a correção deve substituir os
+glifos nativos, nunca desenhar uma camada sobre o framebuffer.
+
+## Fragmentos com controles e tabelas estáticas da loja — 27/08/2026
+
+A fala de carregar objetos não era uma única cadeia. O buffer original ainda
+continha os fragmentos `yellow ` e ` button!`, separados por `E1 07`/`E1 FF`.
+Traduzir o primeiro fragmento como `Botão Amarelo` alterava a geometria e a
+função semântica dos controles. O catálogo agora conserva a estrutura nativa:
+`amarelo ` antes do fechamento do controle e ` botão!` depois dele. O teste
+unitário exige exatamente essa composição e duas linhas mais o terminador.
+
+A loja usa outra rota: pequenas cadeias NUL dentro de blocos carregados por
+SPI/PI, que não passam necessariamente pelo carregador de diálogos. O runtime
+agora percorre cada bloco recém-carregado, aceita somente cadeias ASCII
+completas cuja chave exata existe no catálogo e escreve a tradução no próprio
+slot, usando apenas seu texto e a folga NUL contígua. Isso mantém compositor,
+ordenação, cursor e animação originais; não há sobreposição no framebuffer.
+O teste sintético cobre `Buy -> Comprar` e `Back -> Voltar` em dois slots.
+
+Foram catalogados também `Money`, `Shop`, `Sell`, `Register`, `Previous`,
+`Next`, a ajuda de navegação e as descrições de `Health Oil`/`Mind Oil`.
+Build RT64 e `test_legendas_recursos.exe` passaram; a cobertura em todas as
+telas da loja ainda depende da validação interativa.
+
+## Sonda permanente de tradução ausente — 28/08/2026
+
+O perfil padrão agora define `WPJ2_LEGENDAS_AUSENTES_LOG` e grava
+`traducao_ausentes.tsv` na pasta temporária do teste. A observação ocorre na
+entrada real de `func_80090E58`: portanto registra somente cadeias entregues ao
+formatador, não qualquer ASCII casual encontrado na ROM ou na RDRAM.
+
+A sonda remove controles E0/E1/E2 para a comparação, reconhece tanto a chave
+inglesa quanto a forma PT-BR codificada, elimina os sufixos produzidos quando o
+formatador avança um byte por glifo e deduplica a frase inteira. Como nomes e
+variáveis podem impedir uma igualdade exata mesmo depois da tradução, uma
+classificação conservadora por palavras funcionais separa inglês provável de
+português já aplicado. A calibração inicialmente expôs esse falso positivo e
+foi corrigida; a execução final gerou apenas o cabeçalho, isto é, nenhuma frase
+inglesa sem catálogo nas cenas percorridas.
+
+Esta sonda não enxerga palavras já rasterizadas em recursos gráficos, como a
+classe histórica de `Day`/`Progress`; essas continuam pertencendo ao inventário
+de assets e não ao formatador textual.
+
+## Correspondência entre texto identificado e texto impresso — 28/08/2026
+
+`traducao_validacao.tsv` captura a cadeia antes da substituição e o ponteiro
+final entregue ao formatador. Para chaves exatas, registra também o PT-BR
+esperado e classifica `exato`/`DIVERGENTE`; compostos e texto já traduzido ficam
+separados. Isso cobre a divergência histórica entre “texto localizado na
+memória” e “texto efetivamente impresso”.
+
+Na primeira rodada completa: 15 exatos, 37 já PT-BR, 39 compostos observados e
+uma divergência exata. Ela foi `I'll walk to the place Bird is pointing to!`:
+o consumido tinha uma quebra automática antes de `apontar!`. É diferença de
+layout posterior, não seleção da tradução errada. Entradas `sem_catalogo`
+incluíram números e compostos PT-BR transitórios e não devem ser tratadas como
+inglês ausente; essa função continua pertencendo a `traducao_ausentes.tsv`.

@@ -1,5 +1,28 @@
 # Pendências de fidelidade visual
 
+# Loja/computador — textos ingleses e congelamento completo
+
+- **Impacto:** alto para continuidade da validação. A interface da loja ainda
+  contém recursos em inglês e uma execução congelou imagem e áudio.
+- **Estado em 27/08:** o watchdog finalmente capturou a falha completa. A
+  trilha termina em `__osSpDeviceBusy`, durante `osSpTaskLoad`, com as filas de
+  conclusão vazias e nenhuma DMA RSP realmente pendente. O runtime executa a
+  DMA de SP de modo síncrono; portanto, esperar bits ocupados no espelho MMIO
+  era um estado impossível. `__osSpSetPc` e `__osSpDeviceBusy` agora consultam
+  o estado nativo do RSP. A correção está compilada e aguarda validação longa.
+- **Textos da loja:** rótulos e descrições agora são substituídos nas cadeias
+  NUL do próprio recurso recém-carregado. Não há desenho adicional sobre o
+  framebuffer. `Buy`, `Back`, `Money`, `Shop` e as descrições dos óleos estão
+  cobertos; a tela precisa ser validada interativamente.
+- **Próximo passo:** navegar por vários itens por tempo suficiente para exceder
+  o ponto da trava anterior. Se o watchdog disparar novamente, a nova trilha
+  será comparada com esta antes de alterar mais lógica do escalonador.
+- **Stress acelerado em 28/08:** 240 segundos a 480 Hz, 112.583 chamadas do
+  heap, 160.787 tarefas RSP e cerca de 6,49 GB carregados na TMEM sem trava,
+  descarte RSP ou DMA recusada. O congelamento acumulativo fica considerado
+  corrigido nas rotas exercitadas; permanece necessária cobertura narrativa
+  além da loja, não outra repetição do mesmo menu.
+
 # Legendas PT-BR — expansão de recursos maiores que o inglês
 
 - **Impacto:** alto para cobertura da tradução. O catálogo textual está
@@ -62,8 +85,12 @@
 
 - **Continuam sem origem textual:** `Progress` e `Day`. Não existem na ROM em
   texto plano (`Day` só aparece dentro de "Days") nem apareceram no despejo da
-  RDRAM. Para estas duas a hipótese da imagem pré-rasterizada segue de pé, e é
-  o que resta investigar neste item.
+  RDRAM. Um ring ampliado preservou todos os 144.184 objetos de texto desde o
+  início e confirmou que nenhuma das duas sequências passa por
+  `func_80094230`. O recurso inglês adicional foi isolado em ROM `0x0068E100`
+  (0x282E0 bytes depois de `Spi_DecompressAsset`); a ROM japonesa não o carrega.
+  O que resta é localizar os tiles dos dois rótulos dentro desse recurso e
+  substituí-los antes da composição.
 - **Tentativa rejeitada:** apagar e redesenhar texto no framebuffer produziu
   resíduos de sprites e conflito de ordenação com o cursor. Essa rota foi
   removida.

@@ -35,6 +35,8 @@ typedef int  (__cdecl *wpj2_rt64_submit_fn)(uint32_t dl_start,
                                              uint32_t ucode,
                                              uint32_t ucode_data);
 typedef void (__cdecl *wpj2_rt64_present_fn)(void);
+typedef int  (__cdecl *wpj2_rt64_take_completed_fn)(void);
+typedef void (__cdecl *wpj2_rt64_sync_fn)(void);
 typedef void (__cdecl *wpj2_rt64_shutdown_fn)(void);
 typedef const char* (__cdecl *wpj2_rt64_error_fn)(void);
 

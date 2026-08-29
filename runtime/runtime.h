@@ -17,6 +17,7 @@
 #include <string.h>
 #include "recomp.h"
 #include "video.h"
+#include "savestate_devices.h"
 
 
 typedef struct {
@@ -29,6 +30,9 @@ extern const size_t g_func_table_size;
 
 /* Base do espaco emulado. Indexe como g_rdram[vaddr - 0x80000000]. */
 extern uint8_t* g_rdram;
+/* Telemetria pesada e logs de alta frequencia so pertencem aos perfis de
+ * sonda. O perfil padrao consulta esta chave para permanecer realmente release. */
+int runtime_diagnostics_enabled(void);
 
 /* Janela do cartucho: 0xB0000000. */
 #define CART_WINDOW_OFFSET 0x30000000ull
@@ -63,6 +67,10 @@ void trace_trail(const char* label);
 
 /* --- scheduler cooperativo (runtime/sched.c) --- */
 void     sched_init(void);
+#ifdef RECOMP_STATEFUL
+void     sched_run_stateful(uint8_t* rdram, recomp_func_t* boot,
+                            const recomp_context* boot_context);
+#endif
 void     sched_pause_current(uint8_t* rdram);
 /* __osCleanupThread nunca volta ao chamador: apos remover a OSThread, o fiber
    correspondente tambem precisa deixar de poder ser retomado. */
@@ -88,31 +96,46 @@ void     hle_faixas_report(uint32_t consulta);
 void     hle_heap_report(void);
 void     hle_raster_report(void);
 void     hle_texto_report(const char* prefixo);
+void     hle_texto_capture(const char* directory, unsigned id);
 void     hle_mesg_report(void);
 uint32_t rsp_ultima_textura(void);
 uint64_t hle_retraces(void);
 uint64_t hle_polls(void);
 void     sched_preempt(uint8_t* rdram);
+#define HLE_DELIVERY_WAKE 1
+#define HLE_DELIVERY_VI   2
 int      hle_deliver_events(uint8_t* rdram);
+/* Variante usada dentro de uma thread executável: consulta prazos e entrega
+ * eventos vencidos, mas nunca dorme esperando o próximo VI. */
+int      hle_poll_events(uint8_t* rdram);
 void     hle_set_event_mask(uint32_t mask);
 uint32_t hle_event_mask(void);
 void     hle_set_retrace(double hz);
 void     hle_set_fast_forward(int enabled);
 int      hle_toggle_fast_forward(void);
 int      hle_fast_forward_active(void);
+/* Turbo de navegacao agregado: F11 manual ou replay F4 ate o marco F2. */
+int      hle_navigation_turbo_active(void);
+/* Replay F4 ainda a caminho do poll gravado: permite omitir toda a imagem. */
+int      hle_replay_turbo_active(void);
 void     hle_clock_init(void);
 void     hle_clock_shutdown(void);
+void     hle_clock_resync(void);
 void     hle_force_state2_after(uint64_t polls);
 void     hle_force_active_after(uint64_t polls, int32_t index);
 void     hle_force_next_scene(void);
 void     hle_hold_state_8_1(void);
 void     hle_hold_state_12_50(void);
 void     hle_set_preempt_every_poll(int enabled);
+void     hle_prepare_scheduler_yield(void);
+void     hle_state_capture(wpj2_hle_state_image* image);
+void     hle_state_restore(const wpj2_hle_state_image* image);
 
 /* --- RSP (runtime/rsp.c) --- */
 uint64_t rsp_tasks(void);
 uint64_t rsp_sp_dma(void);
 uint64_t rsp_tasks_tipo(int tipo);
+void     rsp_sync_rt64_completions(void);
 /* F5 nao captura audio em um ponto arbitrario do meio da tarefa RSP: arma a
  * proxima AList de audio, cuja entrada completa podera ser confrontada com o
  * mesmo instante capturado no Project64. */
@@ -180,6 +203,12 @@ uint32_t rsp_acmd_save_peak(void);
 uint64_t rsp_acmd_opcode(uint32_t opcode);
 int      rsp_take_task_done(void);
 int      rsp_peek_task_done(void);
+void     rsp_state_capture(wpj2_rsp_state_image* image);
+void     rsp_state_restore(uint8_t* rdram, const wpj2_rsp_state_image* image);
+
+/* Linha do tempo host opt-in (`WPJ2_PERF_TIMELINE`), acumulada em RAM. */
+void     perf_timeline_mark(const char* tag, uint32_t arg0, uint32_t arg1);
+void     perf_timeline_flush(void);
 
 /* --- Saida de audio hospedada (runtime/audio.c) --- */
 void     audio_init(void);
@@ -193,6 +222,8 @@ uint64_t audio_bytes_queued(void);
 uint32_t audio_peak_sample(void);
 int      audio_ai_done_pending(void);
 void     audio_take_ai_done(void);
+void     audio_state_capture(wpj2_audio_state_image* image);
+void     audio_state_restore(const wpj2_audio_state_image* image);
 
 /* Microcodigo de audio gerado pelo RSPRecomp. Continua opt-in enquanto a
  * comparacao de PCM com o Project64 nao estiver concluida. */
@@ -211,6 +242,8 @@ void     pif_take_si_done(void);
 /* Sai a cada segundo pelo relogio, nao por leitura: continua reportando mesmo
    depois que o jogo para de perguntar pelo controle. */
 void     pif_relatorio_periodico(void);
+void     pif_state_capture(wpj2_pif_state_image* image);
+void     pif_state_restore(const wpj2_pif_state_image* image);
 
 /* Despeja a tabela de glifos 8x8 como arte ASCII e um mapa de ocupacao.
    Uma vez por execucao, sob WPJ2_DESPEJO_FONTE=1. */
@@ -235,13 +268,19 @@ void     legendas_conferir_marca(uint8_t* rdram, const char* ponto);
 void     pif_gravar_transicao(uint16_t b);
 int      pif_gravar_replay(const char* caminho);
 uint64_t pif_polls_atuais(void);
-/* Turbo: enquanto a contagem de leituras nao alcanca o alvo, o portao de 60 Hz
-   nao dorme. Zero desliga. */
+/* Turbo legado v1 por leitura e avanço v2 por retrace. O v1 remove o portao;
+   o v2 conserva uma cadencia acelerada para nao bloquear as demais threads. */
 void     hle_definir_alvo_turbo(uint64_t alvo);
+void     hle_definir_alvo_turbo_retrace(uint64_t alvo);
 int      hle_turbo_ativo(void);
 void     pif_set_buttons(uint16_t b);
 void     pif_set_script(const char* s);
 void     pif_set_poll_script(const char* s);
+void     pif_set_retrace_script(const char* s);
+/* Sequencia deterministica de botoes para stress, iniciada depois do ultimo
+   passo de um replay carregado. Nao e usada no perfil interativo normal. */
+void     pif_set_stress(const char* seed_text, uint64_t after_poll);
+void     pif_stress_shop_text_hint(const uint8_t* text, size_t bytes);
 void     pif_set_stick(const char* value);
 void     pif_update_stick_from_keys(int up, int down, int left, int right);
 
